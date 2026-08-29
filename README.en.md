@@ -25,6 +25,7 @@ QQ messages ──► SnowLuma (OneBot v11 WS) ──► qq-bridge ──► DSH
 - Whitelist/blacklist access control, fail-closed by default.
 - Sensitive text audit prevents paths/credentials from being sent to QQ.
 - MCP tools for reading unread/recent messages and group members, sending messages, replying with quotes, sticker handling and more.
+- Read-only browser tools (open page, snapshot, read content, screenshot, history) for light web browsing; interactive click/typing, arbitrary JS, file download and login-state tools are denied.
 - Slang/network-expression learning with human confirmation.
 - Lightweight memory system for active topics, pending thoughts and member impressions.
 - Sticker library integration with AI-friendly sticker usage.

@@ -1,4 +1,4 @@
-// QQ 桥接安全硬边界：只允许 QQ MCP 工具与少量无害模型侧工具。
+// QQ 桥接安全硬边界：只允许 QQ MCP 工具、无害模型侧工具与只读浏览器工具。
 // 本文件是 agent preset 内相对插件，随 preset 装载进每个 QQ agent 的 scope。
 // 作用：
 //  1) 用 tools.restrict 把已知的开发/管理工具从工具列表隐藏；
@@ -57,12 +57,40 @@ const SAFE_EXACT = new Set([
   'todo_write',
 ])
 
+// 浏览器工具（dsh-builtin-browser）：对群友模式只开放"只读浏览/查询"类——
+// 打开页面、快照、读内容、截图、历史、标签列表等安全能力；而交互执行、
+// 填表、写本地文件、导出登录态等可能被群友诱导操作页面/接触凭据的工具
+// 一律硬拒绝（guard 层，不是软护栏）。deny 列表同时用于 restrict 隐藏 +
+// guard 执行期拦截双保险。
+const BROWSER_ALLOW_PREFIX = 'browser_'
+const BROWSER_DENY = new Set([
+  'browser_execute',       // 任意 JS 执行
+  'browser_click',         // 点击页面（可被诱导）
+  'browser_type',          // 输入文本
+  'browser_key',           // 按键
+  'browser_scroll',        // 滚动
+  'browser_fill',          // 批量填表
+  'browser_set_value',     // 设值
+  'browser_check',         // 勾选
+  'browser_select',        // 下拉
+  'browser_clear',         // 清空
+  'browser_get_value',     // 读控件值（可能读到敏感输入）
+  'browser_download',      // 写本地文件
+  'browser_auth',          // 导出/恢复登录态凭据
+  'browser_replay',        // 回放操作（含历史输入）
+  'browser_restrict',      // 解除护栏
+  'browser_reset',         // 重置标签
+  'browser_reset_session', // 重置浏览器会话
+  'browser_switch_tab',    // 切换标签
+  'browser_close_tab',     // 关闭标签
+])
+
 export function apply(ctx) {
   // 1) 把已知危险全局工具从 schema 隐藏（restrict 只影响继承的全局层，
   //    不会误删 preset 自己注册的 scoped 工具）。
   // 逐个 restrict：当前 DSH 版本不存在的工具名会单独抛错并跳过，
   // 不会导致整批限制失败（restrict 的 unknown 校验是整批原子性的）。
-  for (const name of [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...PROCESS_CONTROL_TOOLS]) {
+  for (const name of [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...PROCESS_CONTROL_TOOLS, ...BROWSER_DENY]) {
     try {
       ctx.tools.restrict({ deny: [name] })
     } catch (error) {
@@ -77,6 +105,13 @@ export function apply(ctx) {
     if (typeof name !== 'string' || name.length === 0) return
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
-    return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`
+    // 浏览器工具只放行只读浏览类（BROWSER_DENY 在 restrict 已隐藏，这里再兜底硬拒）。
+    if (name.startsWith(BROWSER_ALLOW_PREFIX)) {
+      if (BROWSER_DENY.has(name)) {
+        return `工具 "${name}" 对群友模式不安全（可能操作页面/写本地文件/接触凭据），已拒绝`
+      }
+      return
+    }
+    return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具、无害模型侧工具与只读浏览器工具）`
   })
 }
