@@ -4,7 +4,7 @@
 
 这个仓库不只是聊天转发器。它还提供管理员工作会话、群友模式、按会话切换人设、图片与表情处理、本地控制台，以及一组带白名单和限频的 QQ 工具。
 
-> 本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 二次开发，当前版本由 [aplainjane/ai-chat-bot](https://github.com/aplainjane/ai-chat-bot) 继续维护。感谢原作者提供基础实现。
+> 本项目基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 二次开发，当前版本由 [aplainjane/qq_to_deepseekharness](https://github.com/aplainjane/qq_to_deepseekharness) 继续维护。感谢原作者提供基础实现。
 >
 > 本项目与 DeepSeek、腾讯、QQ、SnowLuma 官方均无隶属关系。DSH、SnowLuma 和 QQ 是独立的第三方组件或服务，请分别遵守它们的许可协议和使用条款。
 
@@ -136,7 +136,7 @@ SnowLuma 必须先成功接入受支持的 QQ NT 进程，并在 WebUI 中显示
 下面以 Windows CMD 为例：
 
 ```bat
-git clone https://github.com/aplainjane/ai-chat-bot.git qq-bridge
+git clone https://github.com/aplainjane/qq_to_deepseekharness.git qq-bridge
 cd qq-bridge
 npm install
 copy config.example.json config.json
