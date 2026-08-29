@@ -42,7 +42,7 @@
 | 内核 | `src/mcp-snowluma-safe.js` | 给 DSH agent 用的安全 QQ 工具（只读 + 白名单发送） |
 | 内核 | `src/mcp-host-server.js` | 给 DSH agent 用的 SnowLuma 进程管理（默认禁用启停） |
 | 内核 | `src/slang-learner.js` | 群聊黑话/网络用语学习：存储、候选提取、研究调度、注入 |
-| 内核 | `src/mcp-web-search-safe.js` | 给 DSH agent 用的只读 Web Search MCP（查网络用语/梗） |
+| ~~内核~~ | `src/mcp-web-search-safe.js` | 旧只读 Web Search MCP（已弃用，不再注册；联网查询统一走只读浏览器） |
 | 外核 | `public/console.html` | 本地控制台：状态、参数、手动切换、重置 |
 | 外核 | `config.json` | 运行配置（白名单、QQ/DSH 地址、社交参数）；**不入库** |
 | 外核 | `roles/*.md` | 人格卡（如 `小鲸鱼.md`） |
@@ -61,7 +61,7 @@ qq-bridge/
 │   ├── dsh-client.js           # DSH API 客户端
 │   ├── mcp-snowluma-safe.js    # 安全 MCP（QQ 读/发工具）
 │   ├── mcp-host-server.js      # MCP（SnowLuma 进程管理，默认禁用启停）
-│   ├── mcp-web-search-safe.js  # 安全 MCP（只读 Web Search/Fetch）
+│   ├── mcp-web-search-safe.js  # 旧联网 MCP（已弃用，不再注册；联网统一走只读浏览器）
 │   ├── slang-learner.js        # 黑话/网络用语学习模块
 │   ├── md-to-plain.js          # Markdown 转纯文本
 │   ├── safe-fetch.js           # SSRF 防护的 HTTP(S) 抓取
@@ -238,10 +238,9 @@ DSH 事件流（api.events.mux）→ pumpMux()
 - `snowluma_status`：只读探活。
 - `start_snowluma` / `stop_snowluma`：默认禁用，需 `config.json` 设置 `snowluma.allowProcessControl: true`；仅 `qq-admin`（管理员）会话可用，`qq-chat-v2` 会话会被工具白名单拒绝。
 
-`mcp-web-search-safe.js`：
+`mcp-web-search-safe.js`（已弃用，不再注册）：
 
-- `web_search(query)`：只读搜索。
-- `web_fetch(url)`：只读抓取 HTTP(S) 网页正文，带内网/本机地址 SSRF 拦截。
+- 旧版只读搜索/抓取 MCP。当前联网查询统一走只读浏览器（`dsh-builtin-browser` 插件：`browser_open` / `browser_content` / `browser_screenshot` 等），本文件保留仅供参考。
 
 ---
 
@@ -286,7 +285,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 6. **进程控制**：`start/stop_snowluma` 默认禁用；即使开启，也仅允许 `qq-admin`（管理员）会话调用，普通会话会被工具白名单拒绝。
 7. **配置 fail-closed**：config.json 损坏直接退出；白名单默认不放行。
 8. **控制台鉴权**：可配 `consoleToken`；未配置时自动生成强 token。
-9. **只读联网搜索**：`mcp-web-search-safe.js` 只暴露 `web_search` / `web_fetch`，带 SSRF 防护。
+9. **只读联网查询**：群聊/普通会话联网统一走只读浏览器（`dsh-builtin-browser`），可打开页面、读内容、截图，不能点击/输入/写本地文件；旧的 `mcp-web-search-safe.js` 已弃用不注册。
 10. **黑话人工确认**：自动提取/联网研究的黑话默认 candidate，只有控制台确认后才注入聊天上下文。
 11. **日志脱敏**：日志统一经过 `redactSensitiveText`，不记录路径/凭据等敏感原文。
 12. **二代会话隔离**：每个二代会话生成独立 agent token，MCP 状态/发送工具必须携带 token。
@@ -324,7 +323,6 @@ DSH 事件流（api.events.mux）→ pumpMux()
 node --check src/bridge.js
 node --check src/dsh-client.js
 node --check src/mcp-snowluma-safe.js
-node --check src/mcp-web-search-safe.js
 node --check src/slang-learner.js
 ```
 
@@ -367,7 +365,7 @@ restart.bat
 ### Q：黑话提取/联网研究没生效？
 
 - 确认 `slang.enabled` 为 true、DSH 在线、某会话消息已攒够 `extractMinMessages` 条。
-- 联网研究需要 DSH 学习会话能使用 `web_search` 工具。
+- 联网研究需要 DSH 学习会话能使用只读浏览器工具（`browser_open` / `browser_content`）。
 - 黑话候选不会自动转正，需到控制台「黑话管理」人工确认。
 
 ---

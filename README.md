@@ -24,7 +24,7 @@ SnowLuma
 qq-bridge（本仓库，独立 Node.js 进程）
   │
   ├── DSH Web API：创建会话、发送 prompt、接收回复与审批
-  ├── MCP：向 DSH 提供受限的 QQ、SnowLuma 和网页查询工具
+  ├── MCP：向 DSH 提供受限的 QQ、SnowLuma 工具（联网查询走只读浏览器）
   └── 本地控制台：http://127.0.0.1:3100
   │
   ▼
@@ -34,6 +34,50 @@ DeepSeek Harness
 OneBot 是一套机器人接口规范，不是这个项目里需要单独安装的 npm 包。SnowLuma 负责实现 OneBot v11 并连接 QQ，本项目消费它提供的 WebSocket 和 HTTP 接口。
 
 本项目也不只是一个 DSH 插件：桥接主体是独立进程。仓库内的 `qq-mode-console` 才是安装到 DSH 的设置页插件；`setup-dsh.mjs` 还会安装 agent preset，并把本项目的 MCP 服务挂到 DSH profile。
+
+## 依赖与插件
+
+本仓库是「外部桥接进程 + DSH 端若干安装项」的组合，下面列出运行它需要的东西和相互依赖关系。
+
+**运行环境（外部组件）**
+
+| 组件 | 作用 | 版本说明 |
+|---|---|---|
+| DeepSeek Harness（DSH） | 模型会话运行时，桥接通过其 Web API 交互 | 本仓库基于 DSH 核心 `@deepseek-ai/dsh-base` **0.1.2-alpha.1** 验证；其他版本未逐一验证 |
+| SnowLuma | 接入 QQ 的 OneBot v11 网关 | 独立第三方组件，按其一版本说明部署 |
+| Node.js | 桥接进程运行时 | 需支持 ESM，建议 Node 20+ |
+
+**DSH 端安装项（由 `scripts/setup-dsh.mjs <profile>` 自动安装）**
+
+- `qq-mode-console`：本仓库内置的 DSH 设置页插件（以 `link:` 依赖注册），提供模式/角色/白名单/社交参数/黑话/表情/会话等管理页。
+- agent preset `qq-chat-v2`：群友模式预设（锁定、无本地工具；仅 QQ MCP + 无害模型侧工具 + 只读浏览器）。
+- agent preset `qq-admin`：管理员工作会话预设（完整本地工具，仅 `ownerQQ` 私聊启用）。
+- MCP `mcp-snowluma` / `mcp-snowluma-host`：桥接自带的 QQ 工具与 SnowLuma 进程管理（挂载进 DSH profile 的 `cordis.patch.yml`）。
+
+**需要另外安装的 DSH 插件（社区/第三方，联网查询依赖）**
+
+| 插件 | 版本 | 作用 |
+|---|---|---|
+| `dsh-builtin-browser`（[wqty123/dsh-browser](https://github.com/wqty123/dsh-browser)，MIT） | ^0.1.20 | 共享真实浏览器插件：提供 `browser_*` 工具，人类可见可接管，CDP 驱动。群友模式只读放行 `browser_open` / `browser_content` / `browser_screenshot` 等，其余交互/写文件/凭据类被 `qq-tool-restrict.mjs` 硬拒绝；管理员会话可用完整浏览器工具。**联网查询统一走它** |
+| `dshmarket` | ^1.35.0 | DSH 插件市场，用于安装上述社区插件 |
+| `@zzdream67/dsh-vision-bridge` | ^0.1.0 | 视觉模型桥接：让带图的 QQ 消息可用视觉模型处理 |
+
+**依赖关系（简图）**
+
+```text
+QQ NT
+  └─► SnowLuma（OneBot v11）
+        └─► qq-bridge（本仓库，独立 Node 进程）
+              │  DSH Web API（会话/审批/事件流）+ MCP（QQ/SnowLuma 工具）+ 本地控制台
+              ▼
+        DeepSeek Harness（DSH，dsh-base 0.1.2-alpha.1）
+              │  agent preset：qq-chat-v2（群友）/ qq-admin（管理员）
+              │  插件：dsh-builtin-browser / dshmarket / dsh-vision-bridge / qq-mode-console
+              ▼
+        浏览器（联网查询，群友模式只读）
+```
+
+> **版本提示**：DSH 迭代较快，仓库内的 agent preset 与 `cordis.patch.yml` 是针对上述 DSH 版本验证的。升级 DSH 后如出现 preset/MCP 装载异常，重跑一次 `node scripts/setup-dsh.mjs <profile>`，并按需调整插件版本。
 
 ## 当前仓库增加了什么
 

@@ -8,7 +8,7 @@ export const name = 'qq-tool-restrict'
 export const inject = ['tools']
 
 const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
-  // dsh-super-injector / 开发注入器（当前 DSH 0.1.1-rc.2 实际注册的全局工具）
+  // dsh-super-injector / 开发注入器（DSH 0.1.2-alpha.1 实际注册的全局工具）
   'dev_build_plugin',
   'dev_clear_routes',
   'dev_fix_patch',
@@ -39,7 +39,6 @@ const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
 const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
-  'mcp__web-search-safe__',
 ]
 
 // 进程控制工具（启停 SnowLuma 网关）只允许管理员使用（qq-admin 完整工具 preset）：

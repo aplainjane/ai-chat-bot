@@ -53,7 +53,6 @@ function mcpBlock() {
   const servers = {
     'mcp-snowluma': path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'),
     'mcp-snowluma-host': path.join(REPO_ROOT, 'src', 'mcp-host-server.js'),
-    'mcp-web-search-safe': path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js'),
   };
   let out = '# === qq-bridge MCP BEGIN ===\n';
   for (const [id, script] of Object.entries(servers)) {

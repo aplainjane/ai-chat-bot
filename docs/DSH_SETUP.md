@@ -56,11 +56,12 @@
    - 在 `~/.dsh/profiles/web/cordis.patch.yml` 挂载：
      - `mcp-snowluma`（`src/mcp-snowluma-safe.js`）
      - `mcp-snowluma-host`（`src/mcp-host-server.js`）
-     - `mcp-web-search-safe`（`src/mcp-web-search-safe.js`）
    - 在 `~/.dsh/profiles/web/package.json` 注册 `qq-mode-console` 插件
    - 把 `qq-mode-console` 插件的默认模式设为 `reserved2`（二代仿真）
    - 创建本地 `state/mode.json`（`mode: reserved2`）作为 DSH settings 不可用时的兜底
    - 尝试自动执行 `dsh plugin --profile web install`（当 `dsh` CLI 在 PATH 中可用时），注册 `qq-mode-console` 的 bundle 依赖；若 `dsh` 不在 PATH，缺失依赖时 DSH 会提示补跑
+
+   > 联网查询不依赖额外 MCP：DSH 内置 `dsh-builtin-browser` 插件提供只读 `browser_*` 工具（详见 README「依赖与插件」）。旧 `mcp-web-search-safe` 已弃用，不再挂载。
 
    > 脚本可重复运行；它会覆盖上述三个 preset、更新 MCP 路径并重建失效的插件链接。
    > 已存在的 `qq-bridge/state/mode.json` 会被保留（不覆盖用户设置）；全新安装才会写入 `mode: reserved2`。

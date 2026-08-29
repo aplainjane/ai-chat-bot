@@ -179,7 +179,7 @@ export function buildResearchPrompt(candidates) {
       return `${i + 1}. ${escapeLearnerText(String(e.content || '').slice(0, 50))}${evidence}`;
     })
     .join('\n');
-  return `你是群聊黑话研究员。请针对以下候选网络用语/黑话做**深度联网考究**：先结合给出的群友语境判断可能含义，再使用 web_search 搜索确认，并对最相关的 1~2 个结果用 web_fetch 抓取正文阅读（只读搜索/抓取，不要执行任何本地操作）。不要只依赖搜索摘要。
+  return `你是群聊黑话研究员。请针对以下候选网络用语/黑话做**深度联网考究**：先结合给出的群友语境判断可能含义，再用只读浏览器搜索确认——browser_open 打开搜索页（如 https://www.bing.com/search?q=词条）或直接打开资料链接，再用 browser_content 读取页面正文，交叉验证 1~2 个来源（只读浏览，不要点击/输入/填表，不要执行任何本地操作）。不要只依赖搜索摘要。
 
 候选：
 ${list}

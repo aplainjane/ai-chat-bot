@@ -43,7 +43,8 @@ function ok(name) {
 // 4. buildResearchPrompt 要求深度联网与 sources
 {
   const prompt = buildResearchPrompt([{ content: 'yyds', evidence: [{ text: '这波 yyds' }] }]);
-  assert.ok(prompt.includes('web_fetch'), 'prompt 应要求 web_fetch 抓正文');
+  assert.ok(prompt.includes('browser_open'), 'prompt 应要求只读浏览器查询');
+  assert.ok(prompt.includes('browser_content'), 'prompt 应要求读正文');
   assert.ok(prompt.includes('"sources"'), 'prompt 应要求输出 sources');
   assert.ok(prompt.includes('深度联网考究'), 'prompt 应强调深度联网考究');
   ok('buildResearchPrompt 深度研究指令');
