@@ -1085,7 +1085,7 @@ async function main() {
     try { fs.unlinkSync(SLANG_SESSION_FILE); } catch {}
   }
 
-  function waitLearnerTurn(sessionId, timeoutMs = 120000) {
+  function waitLearnerTurn(sessionId, timeoutMs = 300000) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const arr = learnerWaiters.get(sessionId) ?? [];
