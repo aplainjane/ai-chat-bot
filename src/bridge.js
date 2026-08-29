@@ -1101,6 +1101,24 @@ async function main() {
     });
   }
 
+  // 对学习会话执行一次 prompt；若因会话失效（preset 缺失/会话失效，resume failed）被拒，
+  // 自动重建会话并重试一次，避免黑话学习因旧 preset 被删而永久卡死。
+  async function learnerPromptWithRetry(sessionRef, promptText) {
+    for (let attempt = 0; ; attempt++) {
+      const accepted = await api.sessions.prompt({ sessionId: sessionRef.value, mode: 'queue', content: [{ type: 'text', text: promptText }] });
+      if (accepted.result.ok) return { ok: true, sessionId: sessionRef.value };
+      const reason = `${accepted.result.error.code}: ${accepted.result.error.message}`;
+      const stale = /preset|resume|not found|notfound|404/i.test(reason);
+      if (stale && attempt === 0) {
+        log(`黑话学习会话失效（${reason}），重建后重试`);
+        invalidateSlangLearnerSession();
+        sessionRef.value = await ensureSlangLearnerSession();
+        continue;
+      }
+      return { ok: false, reason };
+    }
+  }
+
   async function runSlangExtraction(key) {
     if (cfg.slang?.enabled === false) return;
     if (!dshReady) return;
@@ -1117,10 +1135,12 @@ async function main() {
     }
 
     const promptText = buildExtractionPrompt(messages);
+    const sessionRef = { value: sessionId };
     try {
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
-      if (!accepted.result.ok) {
-        log(`黑话提取被拒 (${key}): ${accepted.result.error.code}: ${accepted.result.error.message}`);
+      const promptResult = await learnerPromptWithRetry(sessionRef, promptText);
+      sessionId = sessionRef.value;
+      if (!promptResult.ok) {
+        log(`黑话提取被拒 (${key}): ${promptResult.reason}`);
         return;
       }
       const output = await waitLearnerTurn(sessionId);
@@ -1180,10 +1200,12 @@ async function main() {
       return;
     }
     const promptText = buildResearchPrompt(targets);
+    const sessionRef = { value: sessionId };
     try {
-      const accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
-      if (!accepted.result.ok) {
-        log(`黑话研究被拒: ${accepted.result.error.code}: ${accepted.result.error.message}`);
+      const promptResult = await learnerPromptWithRetry(sessionRef, promptText);
+      sessionId = sessionRef.value;
+      if (!promptResult.ok) {
+        log(`黑话研究被拒: ${promptResult.reason}`);
         return;
       }
       const output = await waitLearnerTurn(sessionId);
