@@ -8,7 +8,7 @@
 >
 > 本项目与 DeepSeek、腾讯、QQ、SnowLuma 官方均无隶属关系。DSH、SnowLuma 和 QQ 是独立的第三方组件或服务，请分别遵守它们的许可协议和使用条款。
 
-[项目介绍视频](assets/project-intro.mp4) · [项目说明书](docs/PROJECT_GUIDE.md) · [DSH 端安装说明](docs/DSH_SETUP.md)
+[项目说明书](docs/PROJECT_GUIDE.md) · [DSH 端安装说明](docs/DSH_SETUP.md)
 
 ## 它是怎么接入 QQ 和 DSH 的
 

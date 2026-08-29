@@ -105,7 +105,6 @@ qq-bridge/
   public/
     console.html        # local web console
   roles/                # persona cards
-  assets/               # images and project intro video
   scripts/              # tests and helper scripts
   state/                # runtime data (not in repo)
 ```
