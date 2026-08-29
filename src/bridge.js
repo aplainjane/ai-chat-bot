@@ -7972,21 +7972,34 @@ async function main() {
             }
             // DSH 端（Web 管理界面）已解决审批：清理 QQ 侧挂起，避免管理员在 QQ 端被反复
             // 提示"请回复通过或拒绝"处理一个其实已在 DSH 侧解决的审批。
+            // 注意：approval/decided 的 data.id 是 DSH 的审批请求 id，而挂起里存的
+            // approvalId 是 waterfall 的 eventId，两者不是同一个值，不能精确匹配；
+            // 但 registerPending 保证同一会话同时只有最新一个审批挂起，所以按会话清理是安全的。
             if (frame.event.type === 'approval/decided') {
               const decidedId = frame.event.data?.id;
-              if (decidedId != null) {
-                const pendingEntry = pending.get(key);
-                if (pendingEntry && pendingEntry.kind === 'approval' && String(pendingEntry.approvalId) === String(decidedId)) {
-                  clearTimeout(pendingEntry.timer);
-                  pending.delete(key);
-                  log(`审批已在 DSH 端解决（${frame.event.data?.outcome ?? 'decided'}），清除 QQ 挂起 (${key})`);
-                }
+              log(`收到审批已解决事件 (${key}): id=${decidedId ?? 'null'} outcome=${frame.event.data?.outcome ?? '?'}`);
+              const pendingEntry = pending.get(key);
+              if (pendingEntry && pendingEntry.kind === 'approval') {
+                clearTimeout(pendingEntry.timer);
+                pending.delete(key);
+                log(`审批已在 DSH 端解决，清除 QQ 挂起 (${key}): decided=${decidedId ?? '?'} old=${pendingEntry.approvalId ?? '?'}`);
+              } else {
+                log(`审批已解决但当前无审批挂起 (${key}): id=${decidedId ?? '?'}`);
               }
             }
             const collector = collectors.get(frame.sessionId) ?? createTurnCollector();
             collectors.set(frame.sessionId, collector);
             const ended = collector.push(frame.event);
             if (ended) {
+              // 回合结束：DSH 侧已推进完成，该会话挂起的审批/提问必然已解决
+              // （被批准/拒绝/超时跳过）。兜底清理，避免 QQ 端残留挂起导致
+              // 管理员消息被误当成审批回答反复提示。
+              const endedPending = pending.get(key);
+              if (endedPending) {
+                clearTimeout(endedPending.timer);
+                pending.delete(key);
+                log(`回合结束，清除残留挂起 (${key})`);
+              }
               // reserved2 无行动兜底：普通唤醒回合若既没发消息、也没 mark_read / set_wake_config，
               // 则累计 noActionCount；达到阈值后自动重置 WakeConfig，避免 AI 卡死。
               const silentQueueNow = social.silentTurns.get(frame.sessionId) ?? [];
