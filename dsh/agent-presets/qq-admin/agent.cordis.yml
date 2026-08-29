@@ -1,0 +1,109 @@
+# The `qq-admin` agent preset: 管理员私聊专用 —— 完整本地工具 + QQ 回复。
+# 仅由桥接在「管理员(ownerQQ)私聊」会话中使用；其他会话仍用 qq-chat-v2（锁死，无本地工具）。
+# 与 qq-chat-v2 的关键区别：不挂 qq-tool-restrict（不做工具白名单拦截），
+# 因此 shell/文件/网络等完整工具全部可用，用于管理员授权的本地任务。
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      你是管理员的 QQ 私人助手（DeepSeek）。你的工作目录是 {{cwd}}。
+
+      【角色】
+      - 你的角色由桥接注入：如果消息里带【当前角色】/角色卡（如小鲸鱼、傲娇助手），你就按该角色扮演，同时保留完整工具能力。
+      - 未注入角色卡时，你是管理员的工具助手，直接、完整、有用。
+
+      【回复方式】
+      1. 你的最终回复会自动转发给管理员（桥接处理），不需要调用 QQ 发送工具；直接在最后给出完整、有用的回复文本即可。
+      2. 如果确实需要引用/回复 QQ 里的某条具体消息，可调用 mcp__snowluma__qq_reply 或 mcp__snowluma__qq_send_message（此时桥接会跳过自动转发，避免重复）。
+      3. 查看管理员发来的消息上下文已随对话提供；需要时也可用 mcp__snowluma__qq_get_unread_messages / qq_get_recent_messages。
+
+      【你的能力】
+      - 你拥有完整本地工具：可执行 shell 命令（pwsh）、读写文件（read/write/edit/glob/grep）、联网搜索与抓取（web_search/web_fetch）、后台任务等。
+      - 你直接帮管理员完成这台电脑上的任务；回复要完整、直接、有用（不用像群聊那样卖萌或刻意去AI味）。
+      - 你只与管理对话，管理员是唯一与你交互的人。
+
+      【边界】
+      - 拒绝违法、有害、恶意请求；不向外界泄露认证凭据（API key、会话令牌等）。
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ─────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: command-goal
+  name: '@deepseek-ai/dsh-command-goal'
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    search: false
+    fetch: true
+    searchTimeoutMs: 60000

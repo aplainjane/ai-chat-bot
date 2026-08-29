@@ -240,14 +240,7 @@
     <section class="card span-all">
       <h2><span class="sec-no">01</span>运行模式</h2>
       <div class="mode-row" id="modeRow">
-        <button data-mode="chat">聊天模式</button>
-        <button data-mode="closed-agent">封闭 Agent</button>
-        <button data-mode="reserved">一代仿真模式</button>
-        <button data-mode="reserved2">二代仿真模式</button>
-      </div>
-      <div class="row" style="margin-top:12px">
-        <label style="flex:1;margin:0">封闭 Agent 使用的 DSH 预设</label>
-        <select id="closedPreset" style="max-width:260px"><option value="">加载中…</option></select>
+        <button data-mode="reserved2">群友模式</button>
       </div>
       <div class="meta">二代仿真模式（reserved2）骨架已接入；完整“一切皆工具”链路开发中。</div>
     </section>
@@ -761,7 +754,7 @@
           <label style="flex:1">注入最大条数</label><input type="number" id="slangInjectMax" min="1" max="30" style="width:90px">
         </div>
         <div class="row">
-          <label style="flex:1">学习会话 preset</label><input type="text" id="slangLearnerPreset" placeholder="qq-chat" style="width:120px">
+          <label style="flex:1">学习会话 preset</label><input type="text" id="slangLearnerPreset" placeholder="qq-chat-v2" style="width:120px">
         </div>
         <div class="row">
           <label style="flex:1">学习工作区名</label><input type="text" id="slangWorkspaceTitle" placeholder="QQ 黑话学习" style="width:120px">
@@ -827,7 +820,7 @@
       <input type="text" id="wlPrivate" placeholder="123456789">
       <label>管理员 QQ（ownerQQ，最高权限）</label>
       <input type="text" id="ownerQQ" placeholder="123456789">
-      <div class="meta">管理员是唯一可执行管理命令/审批/closed-agent 的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
+      <div class="meta">管理员是唯一可执行管理命令/审批的 QQ；可留空清除（清除后无管理员，fail-closed）。</div>
       <label>拒绝的群号（黑名单，逗号分隔）</label>
       <input type="text" id="dnGroups" placeholder="">
       <label>拒绝的私聊 QQ（黑名单，逗号分隔）</label>
@@ -964,11 +957,9 @@ async function refresh() {
     document.querySelectorAll('#modeRow button').forEach(b => b.classList.toggle('active', b.dataset.mode === s.mode));
     document.getElementById('roleText').textContent = s.role || '无';
     document.getElementById('roleModeText').textContent = s.roleMode === 'silent' ? '静默' : '正常';
-    const modeLabel = s.mode === 'reserved' ? '一代仿真模式' : s.mode === 'reserved2' ? '二代仿真模式' : s.mode === 'closed-agent' ? '封闭 Agent' : '聊天模式';
+    const modeLabel = s.mode === 'reserved2' ? '群友模式' : (s.mode || '未知');
     document.getElementById('statusText').textContent = 'DSH: ' + (s.dshReady ? '在线' : '离线') + ' ｜ 模式: ' + modeLabel + ' ｜ 管理员: ' + (s.ownerQQ || '未设置') + ' ｜ 群白名单: ' + (s.allowGroups.join(', ') || '无') + ' ｜ 私聊白名单: ' + (s.allowPrivate.join(', ') || '无');
     document.getElementById('activity').textContent = s.activity || '（空）';
-    const presetSel = document.getElementById('closedPreset');
-    if (presetSel && document.activeElement !== presetSel) presetSel.value = s.closedAgentPreset || '';
   } catch (e) { document.getElementById('statusText').textContent = '连接失败: ' + e; }
 }
 
@@ -988,8 +979,7 @@ async function refreshPresets() {
 }
 
 async function saveMode(mode) {
-  const preset = document.getElementById('closedPreset').value || 'router-standard';
-  const r = await api('/api/mode', 'POST', { mode, closedAgentPreset: preset });
+  const r = await api('/api/mode', 'POST', { mode });
   if (r.ok) refresh(); else alert(r.error || '切换失败');
   return r;
 }
@@ -1063,12 +1053,6 @@ document.querySelectorAll('#modeRow button').forEach(b => b.addEventListener('cl
   if (b.disabled) return;
   await saveMode(b.dataset.mode);
 }));
-document.getElementById('closedPreset').addEventListener('change', async () => {
-  // 切换预设立即保存（若当前是 closed-agent 则即时生效，否则供下次切换使用）
-  const active = document.querySelector('#modeRow button.active');
-  const mode = active ? active.dataset.mode : 'chat';
-  await saveMode(mode);
-});
 document.getElementById('roleSet').addEventListener('click', async () => {
   const r = await api('/api/role', 'POST', { role: document.getElementById('roleInput').value.trim() });
   if (r.ok) refreshRoles(); else alert(r.error || '设置失败');

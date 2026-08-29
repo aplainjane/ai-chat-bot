@@ -47,6 +47,7 @@ const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
+const ROLE_OVERRIDES_FILE = path.join(STATE_DIR, 'role-overrides.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
 const SLANG_SESSION_FILE = path.join(STATE_DIR, 'slang-session.json');
 const SOCIAL_V2_FILE = path.join(STATE_DIR, 'social-v2.json');
@@ -140,6 +141,14 @@ const SPACE_SPLIT_HINT = '想分多条消息时用空格分隔；不想分条就
 // 管理员工具会话（owner 私聊）专用分条提示：与 ADMIN_SPACE_SPLIT_HINT 发送侧规则一致，
 // 只有“空格两侧都是汉字”才拆条（中英混排不误拆）；单条超 500 字会按标点硬拆。
 const ADMIN_SPACE_SPLIT_HINT = '【分条规则】你回复里的空格会被当作分条信号：只有空格两侧都是汉字才会拆成两条消息；不想分条就别加空格、用标点连成一句。单条超过 500 字会按标点硬拆。';
+// 管理员工具会话常驻汇报规则：长任务分步实时汇报 + 每次重启后汇报。
+const OWNER_REPORT_RULES = '【汇报规则】① 长时间/多步任务进行中，每完成一步用发送工具（mcp__snowluma__qq_send_message，key 传当前会话）向管理员发一句简短进度（如“开始处理了”“改好了”“正在重启”），让管理员知道你还活着，不要等全部做完才一次性发结果；阶段汇报几小句即可，别刷屏。② 每次桥接或 DSH 重启完成后，主动向管理员汇报一句重启结果。';
+// 管理员工具会话常驻人格提示：与群聊（v2 唤醒提示里的【当前角色】）一致，
+// 每次给管理员会话投递消息时附带当前人格名 + 查看工具，便于 AI 始终知道自己在扮演谁。
+function ownerPersonaHint(key) {
+  const role = resolvedRoleFor(key);
+  return `【当前人格】${role ?? '（未设置，使用助手默认）'}（完整角色卡请调用 qq_get_prompt 查看）`;
+}
 // 群聊指向性提示：引用/回复段表示“这句话是在对被引用的人说”，避免 AI 把群友之间的对话误当成指向自己。
 const DIRECTION_HINT = '注意：消息里的 [引用 某人：...] 表示这句话是在回应被引用的人；引用的是你的消息才是在找你，引用别人时别默认是在找你。';
 
@@ -197,6 +206,48 @@ function readRoleState() {
 }
 function writeRoleState(role, mode) {
   atomicWriteJson(ROLE_STATE_FILE, { role: role ?? null, mode: mode ?? 'active' });
+}
+
+// ── 按会话 ID 的人格覆盖表 ─────────────────────────────────────────────
+// state/role-overrides.json：{ "private:123456789": "纯良鲸鱼娘", "group:987654321": "小鲸鱼", ... }
+// 每个会话按 key 命中自己的角色卡；未命中回退到全局 current-role.json 的默认人格。
+let roleOverridesCache = { mtimeMs: 0, data: {} };
+function loadRoleOverrides() {
+  try {
+    const stat = fs.statSync(ROLE_OVERRIDES_FILE);
+    if (stat.mtimeMs === roleOverridesCache.mtimeMs) return roleOverridesCache.data;
+    const data = readJsonSafe(ROLE_OVERRIDES_FILE, {}, false);
+    roleOverridesCache = { mtimeMs: stat.mtimeMs, data: data && typeof data === 'object' && !Array.isArray(data) ? data : {} };
+    return roleOverridesCache.data;
+  } catch {
+    return {};
+  }
+}
+function saveRoleOverrides() {
+  const data = roleOverridesCache.data;
+  atomicWriteJson(ROLE_OVERRIDES_FILE, data);
+  try { roleOverridesCache.mtimeMs = fs.statSync(ROLE_OVERRIDES_FILE).mtimeMs; } catch {}
+  return data;
+}
+function getRoleOverride(key) {
+  const data = loadRoleOverrides();
+  return key ? data[key] ?? null : null;
+}
+function setRoleOverride(key, role) {
+  const data = loadRoleOverrides();
+  if (!key) return;
+  if (role) data[key] = role; else delete data[key];
+  saveRoleOverrides();
+}
+// 解析某会话实际使用的人格名：会话覆盖 > 全局默认
+function resolvedRoleFor(key) {
+  const ov = getRoleOverride(key);
+  if (ov) return ov;
+  return readRoleState().role || null;
+}
+// 会话覆盖命中的状态文件（用于签名/缓存 mtime 跟踪）
+function roleStateFileFor(key) {
+  return getRoleOverride(key) ? ROLE_OVERRIDES_FILE : ROLE_STATE_FILE;
 }
 function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w\u4e00-\u9fff-]/g, '');
@@ -581,8 +632,62 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// ── QQ 系统表情（face）名称解析 ──────────────────────────────────────────────
+// SnowLuma 自带 sys-face-catalog.json（qSid -> qDes，如 475 -> "/干饭"）。
+// 桥接用它把 [表情<id>] 解析成 [表情:名字]，让 AI 不用每次按需调工具也能看懂普通 QQ 表情。
+// 只读本地静态目录，纯同步、无网络，加载失败时优雅回退为原始 [表情<id>] 文本。
+let faceCatalogMap = null;
+let faceCatalogKey = null; // 缓存键：homeDir（目录变化时重新加载）
+function locateFaceCatalogFile(homeDir) {
+  if (homeDir) {
+    const p = path.join(String(homeDir), 'data', 'sys-face-catalog.json');
+    if (fs.existsSync(p)) return p;
+  }
+  // 回退：在桥接上级目录里找 SnowLuma 便携版目录（开发/便携场景）
+  const parent = path.resolve(ROOT, '..');
+  try {
+    const entries = fs.readdirSync(parent, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isDirectory() || !String(ent.name).startsWith('SnowLuma')) continue;
+      const p = path.join(parent, ent.name, 'data', 'sys-face-catalog.json');
+      if (fs.existsSync(p)) return p;
+    }
+  } catch {}
+  return null;
+}
+function resolveFaceName(faceId, homeDir) {
+  const id = String(faceId ?? '').trim();
+  if (!id) return null;
+  const cacheKey = String(homeDir ?? '');
+  if (faceCatalogKey !== cacheKey || !faceCatalogMap) {
+    const map = new Map();
+    const file = locateFaceCatalogFile(homeDir);
+    if (file) {
+      const root = readJsonSafe(file, null);
+      // SnowLuma 目录是 { packs: [{ emojis: [{ qSid, qDes, ... }] }] } 结构；
+      // 兼容某些直接返回数组的目录。
+      const packs = Array.isArray(root)
+        ? [{ emojis: root }]
+        : (Array.isArray(root?.packs) ? root.packs : []);
+      for (const pack of packs) {
+        if (!pack || typeof pack !== 'object') continue;
+        const emojis = Array.isArray(pack.emojis) ? pack.emojis : [];
+        for (const item of emojis) {
+          if (!item || typeof item !== 'object') continue;
+          const sid = item.qSid != null ? String(item.qSid) : '';
+          const qDes = typeof item.qDes === 'string' && item.qDes.trim() ? item.qDes.trim() : '';
+          if (sid && qDes) map.set(sid, qDes);
+        }
+      }
+    }
+    faceCatalogMap = map;
+    faceCatalogKey = cacheKey;
+  }
+  return faceCatalogMap.get(id) || null;
+}
+
 async function segmentsToText(segments, options = {}) {
-  const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
+  const { resolveAtName, resolveReply, resolveFace, includeReply = true } = options ?? {};
   // 有些 OneBot 实现直接把纯文本消息放在 message 字段里（string）
   if (typeof segments === 'string') return segments.trim();
   const out = [];
@@ -601,7 +706,12 @@ async function segmentsToText(segments, options = {}) {
         }
         break;
       }
-      case 'face': out.push(`[表情${d.id ?? ''}]`); break;
+      case 'face': {
+        const fid = String(d.id ?? '').trim();
+        const faceName = resolveFace ? resolveFace(fid) : null;
+        out.push(faceName ? `[表情:${faceName}]` : `[表情${fid}]`);
+        break;
+      }
       case 'image': out.push('[图片]'); break;
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
@@ -691,6 +801,10 @@ async function main() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   acquireLock();
   loadState();
+
+  // 普通 QQ 表情（face）自动识别：把 [表情<id>] 解析成 [表情:名字]（如 475 -> [表情:/干饭]）。
+  // 查的是 SnowLuma 自带的 sys-face-catalog.json，纯本地同步读取，找不到就回退成原样。
+  const resolveFace = (fid) => resolveFaceName(fid, cfg.snowluma?.homeDir);
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = loadSlang(SLANG_FILE);
@@ -1231,9 +1345,8 @@ async function main() {
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
   let dshReady = false;
   let dshCheckStarted = false;
-  let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
+  let currentMode = 'reserved2'; // 群友模式（二代仿真，唯一使用的模式）
   let lastMode = currentMode;
-  let closedAgentPreset = 'router-standard'; // closed-agent 模式使用的 DSH agent preset
   const queued = new Map(); // key -> { promptText }[]
   const queuedHintAt = new Map(); // key -> timestamp（冷却提示）
   const QUEUE_MAX = 50;
@@ -1257,7 +1370,14 @@ async function main() {
   };
 
   // 从 DSH settings 读取桥接模式；命名空间未注册时回退本地 state/mode.json
-  const VALID_MODES = ['chat', 'closed-agent', 'reserved', 'reserved2'];
+  const VALID_MODES = ['reserved2'];
+  // 对外显示的友好模式名：内部仍用 reserved2 代号，展示给控制台/通知/日志/错误提示时用友好名。
+  const MODE_LABELS = {
+    reserved2: '群友模式'
+  };
+  function modeLabel(mode) {
+    return MODE_LABELS[mode] ?? mode;
+  }
   async function refreshMode() {
     try {
       const s = unwrap(await api.settings.describe({}), 'settings.describe');
@@ -1277,17 +1397,10 @@ async function main() {
     } catch {}
     const local = readJsonSafe(path.join(STATE_DIR, 'mode.json'), null);
     if (local?.mode && VALID_MODES.includes(local.mode)) currentMode = local.mode;
-    if (typeof local?.closedAgentPreset === 'string' && local.closedAgentPreset) {
-      closedAgentPreset = local.closedAgentPreset;
-    }
   }
 
   /** 当前模式是否允许该会话进入 */
   function modeAllowed(key, kind, id, cfg, mode) {
-    if (mode === 'closed-agent') {
-      // 封闭 agent 模式：仅 owner 私聊
-      return key === `private:${String(cfg.ownerQQ ?? '')}`;
-    }
     // chat / reserved / reserved2（仿真模式，暂同 chat 白名单）
     return allowed(kind, id, cfg);
   }
@@ -1299,7 +1412,6 @@ async function main() {
     if (cfg.dsh?.ownerTools === true && key === `private:${String(cfg.ownerQQ ?? '')}`) {
       return 'qq-admin';
     }
-    if (mode === 'closed-agent') return closedAgentPreset || 'router-standard';
     // 二代仿真模式优先使用 socialV2.agentPreset；未配置时回退到默认聊天预设
     if (mode === 'reserved2') return cfg.socialV2?.agentPreset || cfg.agentPreset || undefined;
     return cfg.agentPreset || undefined;
@@ -1333,7 +1445,7 @@ async function main() {
             const [kind, idStr] = key.split(':');
             const id = Number(idStr);
             if (!modeAllowed(key, kind, id, cfg, currentMode)) {
-              log(`补投跳过未授权会话 ${key}（当前模式 ${currentMode}）`);
+              log(`补投跳过未授权会话 ${key}（当前模式 ${modeLabel(currentMode)}）`);
               continue;
             }
             const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [] });
@@ -1388,7 +1500,9 @@ async function main() {
       if (!dshReady) {
         dshReady = true;
         lastMode = currentMode;
-        log(`DSH 已就绪（模式: ${currentMode}）`);
+        log(`DSH 已就绪（模式: ${modeLabel(currentMode)}）`);
+        // 桥接/DSH 重启完成：向管理员投递系统通知，触发 AI 按【汇报规则】汇报
+        notifyOwnerReady();
         if (currentMode === 'reserved2') {
           // 首次确定模式为 reserved2 后再恢复持久化的有限睡眠定时器，
           // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
@@ -1396,30 +1510,13 @@ async function main() {
             setupSleepTimerV2(key);
             scheduleProactiveCheckV2(key);
           }
+          // 管理员偶发主动搭话：此时 currentMode 已确认 reserved2，才可调度（否则会被模式守卫拦截）
+          scheduleOwnerProactive();
           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
         }
         try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
         // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
         for (const key of [...slangWindows.keys()]) maybeQueueSlangExtraction(key);
-      } else if (currentMode !== lastMode) {
-        if (lastMode === 'reserved' && currentMode !== 'reserved') {
-          cleanupSocialForModeChange();
-          log('桥接模式已离开一代仿真模式，清理社交状态');
-        }
-        if (lastMode === 'reserved2' && currentMode !== 'reserved2') {
-          clearAllSocialV2Timers();
-          drainAllPromptQueues('模式切换，已取消排队中的投递');
-          log('桥接模式已离开二代仿真模式，清理 reserved2 定时器与排队投递');
-        }
-        if (currentMode === 'reserved2' && lastMode !== 'reserved2') {
-          for (const key of socialV2.conversations.keys()) {
-            setupSleepTimerV2(key);
-            scheduleProactiveCheckV2(key);
-          }
-          log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
-        }
-        log(`桥接模式已切换为: ${currentMode}`);
-        lastMode = currentMode;
       }
     } else if (dshReady) {
       dshReady = false;
@@ -1431,6 +1528,21 @@ async function main() {
     dshCheckStarted = true;
     checkDsh();
     setInterval(checkDsh, 5000);
+  }
+
+  // 桥接/DSH 重启完成：向管理员（owner）私聊投递系统通知，触发 AI 主动汇报。
+  // 只在该进程首次确认 DSH 就绪、或 DSH 从不可用恢复时执行（dshReady false→true 转换）。
+  function notifyOwnerReady() {
+    if (!cfg.ownerQQ) return;
+    const ownerKey = `private:${String(cfg.ownerQQ)}`;
+    try {
+      const kind = 'private';
+      const id = Number(cfg.ownerQQ);
+      if (!modeAllowed(ownerKey, kind, id, cfg, currentMode)) return;
+      deliverPrompt(ownerKey, `【系统通知】桥接已完成重启并连接 DSH（当前模式: ${modeLabel(currentMode)}）。请按【汇报规则】向管理员简要汇报本次重启已正常完成。`).catch((error) => log(`重启完成通知投递失败: ${error?.message ?? error}`));
+    } catch (error) {
+      log(`重启完成通知异常: ${error?.message ?? error}`);
+    }
   }
 
   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
@@ -1596,7 +1708,7 @@ async function main() {
           const rs = readRoleState();
           sendJson({
             mode: currentMode,
-            closedAgentPreset,
+            modeLabel: modeLabel(currentMode),
             role: rs.role ?? null,
             roleMode: rs.mode ?? 'active',
             dshReady,
@@ -1619,26 +1731,12 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/mode') {
           const body = await readBody();
-          if (!['chat', 'closed-agent', 'reserved', 'reserved2'].includes(body.mode)) {
-            sendJson({ ok: false, error: 'mode 必须是 chat / closed-agent / reserved / reserved2' }, 400);
+          if (!VALID_MODES.includes(body.mode)) {
+            sendJson({ ok: false, error: `mode 必须是 ${VALID_MODES.join(' / ')}` }, 400);
             return;
           }
-          const existing = readJsonSafe(path.join(STATE_DIR, 'mode.json'), {});
-          const next = {
-            mode: body.mode,
-            ...(body.closedAgentPreset ? { closedAgentPreset: String(body.closedAgentPreset) } : { closedAgentPreset: existing.closedAgentPreset ?? 'router-standard' })
-          };
+          const next = { mode: body.mode };
           atomicWriteJson(path.join(STATE_DIR, 'mode.json'), next);
-          if (next.closedAgentPreset) closedAgentPreset = next.closedAgentPreset;
-          if (currentMode === 'reserved' && body.mode !== 'reserved') {
-            cleanupSocialForModeChange();
-            log('控制台：模式离开一代仿真模式，清理社交状态');
-          }
-          if (currentMode === 'reserved2' && body.mode !== 'reserved2') {
-            clearAllSocialV2Timers();
-            drainAllPromptQueues('模式切换，已取消排队中的投递');
-            log('控制台：模式离开二代仿真模式，清理 reserved2 定时器与排队投递');
-          }
           currentMode = body.mode;
           lastMode = body.mode;
           if (body.mode === 'reserved2') {
@@ -1646,10 +1744,10 @@ async function main() {
               setupSleepTimerV2(key);
               scheduleProactiveCheckV2(key);
             }
-            log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
+            log('控制台：模式进入群友模式，重建有限睡眠定时器');
           }
-          log(`控制台：模式已设置为 ${body.mode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}`);
-          sendJson({ ok: true, mode: body.mode, closedAgentPreset: next.closedAgentPreset });
+          log(`控制台：模式已设置为 ${body.mode}`);
+          sendJson({ ok: true, mode: body.mode });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/role') {
@@ -1683,7 +1781,7 @@ async function main() {
         // ── 人格管理 ──────────────────────────────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/roles') {
           const rs = readRoleState();
-          sendJson({ roles: listRoles(), current: rs.role ?? null });
+          sendJson({ roles: listRoles(), current: rs.role ?? null, overrides: loadRoleOverrides() });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/roles/create') {
@@ -2082,7 +2180,7 @@ async function main() {
           if (!message) { sendJson({ ok: false, error: '消息不能为空' }, 400); return; }
           if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403); return; }
           if (!allowed(kind, id, cfg)) { sendJson({ ok: false, error: `目标不在白名单内（${kind} ${id}），请先加入白名单` }, 403); return; }
-          if (!modeAllowed(`${kind}:${id}`, kind, id, cfg, currentMode)) { sendJson({ ok: false, error: `当前模式（${currentMode}）不允许向 ${kind}:${id} 发送测试消息` }, 403); return; }
+          if (!modeAllowed(`${kind}:${id}`, kind, id, cfg, currentMode)) { sendJson({ ok: false, error: `当前模式（${modeLabel(currentMode)}）不允许向 ${kind}:${id} 发送测试消息` }, 403); return; }
           try {
             const safeMessage = escapeCqText(redactKnownTokensOnly(message));
             const result = kind === 'private'
@@ -2200,7 +2298,7 @@ async function main() {
             return;
           }
           if (!modeAllowed(key, kind, id, cfg, currentMode)) {
-            sendJson({ ok: false, error: `该会话不在当前模式（${currentMode}）允许范围内` }, 403);
+            sendJson({ ok: false, error: `该会话不在当前模式（${modeLabel(currentMode)}）允许范围内` }, 403);
             return;
           }
           if (!state.sessions[key] && !allowed(kind, id, cfg)) {
@@ -2212,8 +2310,8 @@ async function main() {
             return;
           }
           const isV2 = currentMode === 'reserved2';
-          const roleState = readRoleState();
-          const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+          const curRole = resolvedRoleFor(key);
+          const roleLine = curRole ? `【当前角色】${curRole}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
           // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
           let tokenLine = '';
           if (isV2) {
@@ -2487,7 +2585,6 @@ async function main() {
           if (cfg.socialV2?.sticker?.enabled !== false) {
             try { await syncStickerLibrary(false); } catch {}
           }
-          const roleState = readRoleState();
           const toolMap = {
             getPrompt: 'qq_get_prompt',
             getUnread: 'qq_get_unread_messages',
@@ -2529,7 +2626,7 @@ async function main() {
             ok: true,
             key,
             time: new Date().toISOString(),
-            role: { name: roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
+            role: { name: resolvedRoleFor(key) ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2(key) : currentRoleHint(key) },
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -2848,7 +2945,7 @@ async function main() {
             sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403);
             return;
           }
-          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!req.headers['x-agent-token'] && !isOwnerToolsKey(key)) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) {
             sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400);
@@ -2971,7 +3068,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
-          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!req.headers['x-agent-token'] && !isOwnerToolsKey(key)) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           const kind = keyMatch[1];
@@ -3270,7 +3367,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendSticker')) { sendJson({ ok: false, error: '工具未启用：qq_send_sticker' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
-          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!req.headers['x-agent-token'] && !isOwnerToolsKey(key)) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           const kind = keyMatch[1];
@@ -3758,11 +3855,11 @@ async function main() {
             sendJson({ ok: false, error: '合并转发查看仅 reserved2 模式可用' }, 403);
             return;
           }
-          if (!agentToken) {
+          if (!agentToken && !isOwnerToolsKey(key)) {
             sendJson({ ok: false, error: 'reserved2 模式读取合并转发必须携带 agent token' }, 403);
             return;
           }
-          if (!agentTokenOk(key, agentToken)) {
+          if (agentToken && !agentTokenOk(key, agentToken)) {
             sendJson({ ok: false, error: 'agent token 无效' }, 403);
             return;
           }
@@ -4130,7 +4227,7 @@ async function main() {
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           if (!messageId) { sendJson({ ok: false, error: 'messageId 不能为空' }, 400); return; }
-          if (currentMode === 'reserved2' && !agentToken) {
+          if (currentMode === 'reserved2' && !agentToken && !isOwnerToolsKey(key)) {
             sendJson({ ok: false, error: 'reserved2 模式读取图片必须携带 agent token' }, 403);
             return;
           }
@@ -4149,10 +4246,6 @@ async function main() {
             return;
           }
           if (agentToken && !v2ToolEnabled('getImages')) {
-            sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
-            return;
-          }
-          if (!agentToken && currentMode === 'closed-agent' && !v2ToolEnabled('getImages')) {
             sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
             return;
           }
@@ -4182,10 +4275,10 @@ async function main() {
           const replyToMessageId = isReply ? body.replyToMessageId : body.replyToMessageId;
           const atUserId = body.atUserId ?? null;
           const key = isPrivate ? `private:${targetId}` : `group:${targetId}`;
-          // 安全边界：发送工具只允许在 closed-agent（管理员私聊）或 reserved2（二代 AI 带会话令牌）下使用；
+          // 安全边界：发送工具仅限 reserved2（群友模式）使用；
           // chat/reserved 的自动转发已覆盖正常回复，MCP 发送工具不应成为 prompt injection 的越权出口。
           if (currentMode === 'chat' || currentMode === 'reserved') {
-            sendJson({ ok: false, error: '发送工具仅限 closed-agent / reserved2 模式使用' }, 403);
+            sendJson({ ok: false, error: '发送工具仅限群友模式使用' }, 403);
             return;
           }
           if (socialV2.paused && token) {
@@ -4838,10 +4931,13 @@ async function main() {
   async function fetchFaceMedia(media) {
     const faceId = Number(media.faceId);
     if (!Number.isInteger(faceId)) return { text: `[表情#${media.faceId}]` };
+    // 表情名优先走本地目录（与消息段 [表情:名字] 保持一致，无需联网解码）；
+    // 联网的 fetchFaceEntity 只用来拿图片字节供视觉模型查看，不再承担“拼表情解码”职责。
+    const localName = resolveFaceName(media.faceId, cfg.snowluma?.homeDir);
     try {
       const face = await bot.fetchFaceEntity(faceId);
       if (face && typeof face === 'object') {
-        const desc = face.q_des || (Array.isArray(face.emoji_name_alias) && face.emoji_name_alias[0]) || '';
+        const desc = localName || face.q_des || (Array.isArray(face.emoji_name_alias) && face.emoji_name_alias[0]) || '';
         if (face.url) {
           try {
             const fetched = await safeFetchBuffer(String(face.url), MAX_MEDIA_BYTES);
@@ -4860,7 +4956,8 @@ async function main() {
     } catch (error) {
       log(`fetchFaceEntity 失败: ${error?.message ?? error}`);
     }
-    return { text: `[表情#${media.faceId}]` };
+    // 联网拿不到实体时，本地目录仍能给出名字，避免退化成无意义的 [表情#id]。
+    return { text: localName ? `[表情:${localName}]` : `[表情#${media.faceId}]` };
   }
 
   async function resolveMediaList(mediaList) {
@@ -5034,11 +5131,12 @@ async function main() {
     const [kind, id] = key.split(':');
     const sent = [];
     const failed = [];
+    let chain = sendChain;
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const useReply = i === 0 ? replyToMessageId : null;
       const useAt = i === 0 ? atUserId : null;
-      sendChain = sendChain
+      chain = chain
         .then(async () => {
           await onebotSend(kind, id, msg, useReply, useAt);
           sent.push(msg);
@@ -5049,10 +5147,11 @@ async function main() {
         });
       if (i < delays.length) {
         const d = delays[i];
-        sendChain = sendChain.then(() => sleep(d));
+        chain = chain.then(() => sleep(d));
       }
     }
-    return sendChain.then(() => {
+    sendChain = chain;
+    return chain.then(() => {
       if (failed.length > 0) {
         const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
         err.sent = sent.slice();
@@ -5066,9 +5165,6 @@ async function main() {
   // 其私聊里能看到任何回复（含路径/凭据/令牌），不需要拦截；其余会话一律审计。
   function shouldAuditKey(key) {
     if (isOwnerToolsKey(key)) return false;
-    if (currentMode === 'closed-agent') {
-      return !(key === `private:${String(cfg.ownerQQ ?? '')}`);
-    }
     return true;
   }
 
@@ -5929,7 +6025,8 @@ async function main() {
     if (opts.farewell) social.exitingSessions.add(sessionId);
     let accepted;
     try {
-      accepted = await api.sessions.prompt({ sessionId, mode: 'queue', content });
+      // 管理员工具会话用 steer（立即打断当前回合处理），其余会话保持 queue（排队等当前回合结束）。
+      accepted = await api.sessions.prompt({ sessionId, mode: isOwnerToolsKey(key) ? 'steer' : 'queue', content });
     } catch (error) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       throw error;
@@ -6172,19 +6269,19 @@ async function main() {
     startSocialLoop();
   }
 
-  // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
+  // 当前角色扮演提示：读 state/current-role.json（全局默认）+ state/role-overrides.json（按会话覆盖）+ roles/<角色>.md，
   // 由桥接注入到 QQ 群消息（群友无法通过对话修改，只能由管理端写该文件）。
-  // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
+  // 缓存 key 为 [会话key|角色名|两个状态文件 mtime]，mtime 未变时直接返回，避免每次同步读文件。
   let roleHintCache = { key: '', hint: '' };
-  function currentRoleHint() {
+  function currentRoleHint(key) {
     try {
-      const rs = readRoleState();
-      if (!rs.role) return '';
-      const roleFile = path.join(ROOT, 'roles', rs.role + '.md');
+      const role = resolvedRoleFor(key);
+      if (!role) return '';
+      const roleFile = path.join(ROOT, 'roles', role + '.md');
       if (!fs.existsSync(roleFile)) return '';
-      const stateStat = fs.statSync(ROLE_STATE_FILE);
+      const stateStat = fs.statSync(roleStateFileFor(key));
       const roleStat = fs.statSync(roleFile);
-      const cacheKey = `${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
+      const cacheKey = `${key ?? ''}\u0000${role}\u0000${stateStat.mtimeMs}\u0000${roleStat.mtimeMs}`;
       if (roleHintCache.key === cacheKey) return roleHintCache.hint;
       let hint = fs.readFileSync(roleFile, 'utf8');
       if (hint.length > 6000) hint = hint.slice(0, 6000);
@@ -6195,16 +6292,16 @@ async function main() {
     }
   }
 
-  // 角色签名：角色名 + current-role.json 与角色卡文件的 mtime。任一变化（切角色/改卡）都会产生新签名。
-  function roleSignature() {
+  // 角色签名：会话解析出的角色名 + 状态文件与角色卡文件的 mtime。任一变化（切角色/改卡）都会产生新签名。
+  function roleSignature(key) {
     try {
-      const rs = readRoleState();
-      if (!rs.role) return '';
-      const roleFile = path.join(ROOT, 'roles', rs.role + '.md');
+      const role = resolvedRoleFor(key);
+      if (!role) return '';
+      const roleFile = path.join(ROOT, 'roles', role + '.md');
       if (!fs.existsSync(roleFile)) return '';
-      const stateStat = fs.statSync(ROLE_STATE_FILE);
+      const stateStat = fs.statSync(roleStateFileFor(key));
       const roleStat = fs.statSync(roleFile);
-      return `${rs.role}:${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
+      return `${role}:${stateStat.mtimeMs}:${roleStat.mtimeMs}`;
     } catch {
       return '';
     }
@@ -6213,8 +6310,8 @@ async function main() {
   // 按会话只注入一次角色卡：DSH 会话有持久上下文，角色卡进过一次历史就永远有效，
   // 反复注入纯属浪费 token。规则：新建会话首条消息 / 切换角色后 / 角色卡文件变更后 才注入。
   function currentRoleHintFor(key) {
-    const hint = currentRoleHint();
-    const sig = roleSignature();
+    const hint = currentRoleHint(key);
+    const sig = roleSignature(key);
     if (!hint || !sig) {
       if (state.roleLoaded) delete state.roleLoaded[key];
       return '';
@@ -6313,8 +6410,8 @@ async function main() {
     return `第 ${bad.join('，')} 条之间像是把同一句话拆开了；如果两条拼起来才完整，请合并成一条，或把断点移到完整句子的边界。`;
   }
 
-  function currentRoleHintV2() {
-    const raw = currentRoleHint();
+  function currentRoleHintV2(key) {
+    const raw = currentRoleHint(key);
     if (!raw) return '';
     // 一代仿真模式专用指令整行过滤，避免污染二代工具协议
     const GEN1_ROLE_LINE_RE = /\[SILENT\]|空格分隔|按空格|用空格|空格分句|空格代表|自动转发|回复会自动|输出\s*\[SILENT\]/i;
@@ -6449,6 +6546,7 @@ async function main() {
       const sender = raw.sender?.card || raw.sender?.nickname || String(raw.sender?.user_id ?? raw.user_id ?? '未知');
       const text = await segmentsToText(raw.message ?? [], {
         resolveAtName: kind === 'group' ? (qq) => resolveGroupMemberName(convId, qq) : null,
+        resolveFace,
         includeReply: false
       });
       const senderUserId = raw.sender?.user_id ?? raw.user_id ?? null;
@@ -6792,8 +6890,8 @@ async function main() {
   }
 
   function buildWakePromptV2(key, reason) {
-    const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const curRole = resolvedRoleFor(key);
+    const roleLine = curRole ? `【当前角色】${curRole}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
@@ -6851,8 +6949,8 @@ async function main() {
   }
 
   function buildWakeReminderPromptV2(key) {
-    const roleState = readRoleState();
-    const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const curRole = resolvedRoleFor(key);
+    const roleLine = curRole ? `【当前角色】${curRole}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
@@ -7139,6 +7237,72 @@ async function main() {
     log(`[reserved2] 已安排主动机会检查 ${key}，约 ${Math.round(delay / 60000)}min 后`);
   }
 
+  // ── 管理员工具会话：偶发主动搭话 ─────────────────────────────────────
+  let ownerProactiveTimer = null;
+  function ownerProactiveKey() {
+    return cfg.ownerQQ ? convKey('private', cfg.ownerQQ) : null;
+  }
+  function ownerProactivePromptText() {
+    const hint = cfg.socialV2?.ownerProactive?.promptHint
+      || '这是偶发的主动搭话时机（管理员没有在找你，只是到了可以主动聊一句的时候）。请给管理员发一条自然、轻松、一两句话的消息：可以分享一个想法/趣事，关心一下近况，或抛个小问题；贴合你的人格，别官方、别啰嗦，不要用「收到/好的/在的」这类应答式口吻。如果觉得现在不适合打扰管理员（例如你们刚聊过不久、或管理员看起来在忙），可以只输出 [SILENT] 表示这次不主动搭话。';
+    return `【主动搭话】${hint}\n\n${ADMIN_SPACE_SPLIT_HINT}\n${ownerPersonaHint(ownerProactiveKey())}`;
+  }
+  function scheduleOwnerProactive() {
+    if (ownerProactiveTimer) return;
+    const p = cfg.socialV2?.ownerProactive ?? {};
+    if (p.enabled === false || !ownerProactiveKey()) return;
+    if (currentMode !== 'reserved2') return;
+    const min = Math.max(60 * 1000, Number(p.intervalMinMs) || 3600000);
+    const max = Math.max(min, Number(p.intervalMaxMs) || 7200000);
+    const delay = Math.floor(min + Math.random() * (max - min));
+    ownerProactiveTimer = setTimeout(() => {
+      ownerProactiveTimer = null;
+      void tryOwnerProactiveNudge();
+      scheduleOwnerProactive();
+    }, delay);
+    ownerProactiveTimer.unref?.();
+    log(`[reserved2] 已安排管理员主动搭话检查，约 ${Math.round(delay / 60000)}min 后`);
+  }
+  async function tryOwnerProactiveNudge() {
+    try {
+      const key = ownerProactiveKey();
+      const p = cfg.socialV2?.ownerProactive ?? {};
+      if (p.enabled === false || !key) return;
+      if (currentMode !== 'reserved2' || socialV2.paused) return;
+      if (!isSessionAllowedInCurrentMode(key)) return;
+      const now = Date.now();
+      const st = socialV2.conversations.get(key);
+      // 刚聊过不久不打扰（以最近一条记录的消息时间为准）
+      const quiet = Math.max(0, Number(p.minQuietAfterMs) || 600000);
+      const recent = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+      const lastMsgTime = recent.reduce((mx, m) => Math.max(mx, Number(m?.time || 0)), 0);
+      if (now - lastMsgTime < quiet) {
+        log('[reserved2] 管理员主动搭话跳过：刚聊过不久');
+        return;
+      }
+      // 深夜降权
+      let prob = Number(p.probability);
+      if (!Number.isFinite(prob)) prob = 0.5;
+      const hour = new Date().getHours();
+      const start = Number(p.quietHoursStart ?? 23);
+      const end = Number(p.quietHoursEnd ?? 8);
+      const inQuietHours = start <= end ? (hour >= start && hour < end) : (hour >= start || hour < end);
+      if (inQuietHours) prob *= Number(p.quietHoursProbabilityFactor ?? 0.2);
+      // 最近自己主动说过太多条就降权，避免话痨
+      const maxSelf = Number(p.maxSelfMsgPerHour) || 4;
+      const selfCount = recent.filter((m) => m && m.isSelf && now - Number(m?.time || 0) < 3600000).length;
+      if (selfCount >= maxSelf) prob *= 0.3;
+      if (Math.random() >= prob) {
+        log(`[reserved2] 管理员主动搭话未命中（概率 ${prob.toFixed(2)}）`);
+        return;
+      }
+      await deliverPrompt(key, ownerProactivePromptText());
+      log('[reserved2] 已向管理员投递主动搭话提示');
+    } catch (error) {
+      log('[reserved2] 管理员主动搭话异常:', error?.message ?? error);
+    }
+  }
+
   function clearSocialV2Timers(key) {
     const st = socialV2.conversations.get(key);
     if (!st) return;
@@ -7190,7 +7354,7 @@ async function main() {
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
-      log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
+      log(`忽略未授权会话 ${key}（当前模式 ${modeLabel(currentMode)}，来自 ${event.user_id}）`);
       return;
     }
     const resolveAtName = async (qq) => {
@@ -7201,8 +7365,8 @@ async function main() {
     const resolveReply = (messageId) => resolveReplyInfo(kind, id, messageId, event.self_id);
     // textContent 带引用对象信息，供 DSH 判断“这句话在对谁说”；
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
-    const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
-    const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
+    const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply, resolveFace });
+    const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveFace, includeReply: false });
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
@@ -7311,15 +7475,19 @@ async function main() {
       if (plainContent === '/role' || plainContent.startsWith('/role ')) {
         const name = sanitizeRoleName(plainContent.slice(5).trim());
         if (!name || name === 'off' || name === 'clear') {
-          writeRoleState(null, roleState.mode);
-          await sendToQQ(key, '已清除角色，恢复正常人格。');
+          setRoleOverride(key, null);
+          if (state.roleLoaded) delete state.roleLoaded[key];
+          saveState();
+          await sendToQQ(key, '已清除本会话角色，恢复默认人格。');
         } else {
           const roleFile = path.join(ROOT, 'roles', name + '.md');
           if (!fs.existsSync(roleFile)) {
             await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
           } else {
-            writeRoleState(name, roleState.mode);
-            await sendToQQ(key, `已切换角色：${name}。`);
+            setRoleOverride(key, name);
+            if (state.roleLoaded) delete state.roleLoaded[key];
+            saveState();
+            await sendToQQ(key, `已切换本会话角色：${name}。`);
           }
         }
         return;
@@ -7338,23 +7506,76 @@ async function main() {
     }
 
     // ── 管理员会话自动角色切换（硬性机制，不经模型判断）──────────────
-    // 管理员在聊天里说「进入角色扮演：X」「切换角色：X」「设置角色 X」「退出角色扮演」等，
-    // 桥接直接写 state/current-role.json 并让角色卡在下一轮重新注入（签名变化），
-    // 不用手动敲 /role；只有管理员（ownerQQ）触发，群友由上方「控制类话语」拦截。
+    // 人格按会话 ID 存储（state/role-overrides.json），每个会话命中自己的角色卡；
+    // 未单独设置的会话回退到全局默认人格（state/current-role.json）。
+    // 命令：切换角色：X（本会话）/ 退出角色扮演（本会话）/ 设置默认人格：X / 设置 group:群号 人格：X / 查看人格
+    // 只有管理员（ownerQQ）触发，群友由上方「控制类话语」拦截。
     if (isOwner && !plainContent.startsWith('/')) {
       const roleText = plainContent.trim();
-      // 退出/清除角色：严格整句匹配，避免误吞普通聊天
-      const exitRe = /^(?:退出|关闭|结束|取消|停止)\s*角色扮演[！!。.]?\s*$|^(?:清除|取消)\s*角色[！!。.]?\s*$|^恢复\s*(?:正常|原样|原本)?(?:人格|角色)?[！!。.]?\s*$|^不演了[！!。.]?\s*$/;
-      if (exitRe.test(roleText)) {
-        writeRoleState(null, roleState.mode);
-        if (state.roleLoaded) delete state.roleLoaded[key];
-        saveState();
-        await sendToQQ(key, '已退出角色扮演，恢复正常人格。');
-        appendActivity(`${key} 管理员退出角色扮演`);
+      const roleExists = (name) => fs.existsSync(path.join(ROOT, 'roles', name + '.md'));
+      // 查看可用角色卡列表
+      const listRolesRe = /^(?:查看|显示|列出)\s*(?:角色卡|可用角色|角色列表)[！!。.]?\s*$/;
+      if (listRolesRe.test(roleText)) {
+        const roles = listRoles();
+        await sendToQQ(key, `可用角色卡（qq-bridge/roles/）：${roles.join('、') || '（无）'}。想看内容可直接对我说「看下小鲸鱼的角色卡」。`);
         return;
       }
-      // 进入/切换角色：必须带角色名，且整句匹配（末尾只允许少量标点）。
-      // 「角色扮演/角色」后要求冒号或空格作为分隔，避免误吞「切换角色感觉怎么样」这类普通聊天。
+      // 查看人格配置
+      const viewRe = /^(?:查看|显示)\s*(?:人格|角色|人格配置)[！!。.]?\s*$/;
+      if (viewRe.test(roleText)) {
+        const ov = loadRoleOverrides();
+        const defaultRole = readRoleState().role || '（无）';
+        const lines = [`默认人格：${defaultRole}`];
+        for (const [k, r] of Object.entries(ov)) lines.push(`  ${k} → ${r}`);
+        if (Object.keys(ov).length === 0) lines.push('  （暂无按会话覆盖）');
+        await sendToQQ(key, `人格配置：\n${lines.join('\n')}`);
+        return;
+      }
+      // 设置全局默认人格
+      const defaultRe = /^(?:设置|把|将)\s*(?:默认|全局)\s*(?:人格|角色)[\s:：]+([^\s:：,，。！!？?、/]+)[！!。]?\s*$/;
+      const dm = defaultRe.exec(roleText);
+      if (dm) {
+        const name = sanitizeRoleName(dm[1]);
+        if (!roleExists(name)) {
+          await sendToQQ(key, `角色「${name}」不存在。可用角色：${listRoles().join('、') || '（无）'}。`);
+        } else {
+          writeRoleState(name, roleState.mode);
+          saveState();
+          await sendToQQ(key, `已设置全局默认人格：${name}（未单独设置人格的会话将使用它）。`);
+          appendActivity(`${key} 设置全局默认人格：${name}`);
+        }
+        return;
+      }
+      // 指定会话设置人格：把 group:1106664281 的人格换成 X / 设置私聊 1159418991 人格 X
+      const targetRe = /^(?:把|给|设置|将)\s*(?:(group|private|群|群聊|私聊)[\s:：]*(\d+))\s*(?:的)?\s*(?:人格|角色)[\s:：]*(?:换成|改成|切换成|设置为|设为|变成|为)?[\s:：]*([^\s:：,，。！!？?、/]+)[！!。]?\s*$/;
+      const tm = targetRe.exec(roleText);
+      if (tm) {
+        const kindMap = { group: 'group', private: 'private', 群: 'group', 群聊: 'group', 私聊: 'private' };
+        const targetKey = `${kindMap[tm[1]]}:${tm[2]}`;
+        const name = sanitizeRoleName(tm[3]);
+        if (!roleExists(name)) {
+          await sendToQQ(key, `角色「${name}」不存在。可用角色：${listRoles().join('、') || '（无）'}。`);
+        } else {
+          setRoleOverride(targetKey, name);
+          if (state.roleLoaded) delete state.roleLoaded[targetKey];
+          saveState();
+          await sendToQQ(key, `已设置 ${targetKey} 人格：${name}。`);
+          appendActivity(`${key} 设置 ${targetKey} 人格：${name}`);
+        }
+        return;
+      }
+      // 退出/清除角色：移除本会话覆盖，回退到默认人格
+      const exitRe = /^(?:退出|关闭|结束|取消|停止)\s*角色扮演[！!。.]?\s*$|^(?:清除|取消)\s*角色[！!。.]?\s*$|^恢复\s*(?:正常|原样|原本)?(?:人格|角色)?[！!。.]?\s*$|^不演了[！!。.]?\s*$/;
+      if (exitRe.test(roleText)) {
+        const had = getRoleOverride(key);
+        setRoleOverride(key, null);
+        if (state.roleLoaded) delete state.roleLoaded[key];
+        saveState();
+        await sendToQQ(key, had ? '已退出本会话角色扮演，恢复默认人格。' : '当前会话未单独设置人格，本就在用默认人格。');
+        appendActivity(`${key} 管理员退出本会话角色扮演`);
+        return;
+      }
+      // 进入/切换角色（本会话）：必须带角色名，且整句匹配（末尾只允许少量标点）。
       const enterPatterns = [
         /^(?:进入|开启|开始|进行)\s*角色扮演[\s:：]+([^\s:：,，。！!？?、/]+)[！!。]?\s*$/,
         /^(?:切换|设置|更换|换成|换)\s*(?:到)?\s*角色[\s:：]+([^\s:：,，。！!？?、/]+)[！!。]?\s*$/,
@@ -7367,13 +7588,12 @@ async function main() {
       }
       if (em) {
         const name = sanitizeRoleName(em[1]);
-        const roleFile = path.join(ROOT, 'roles', name + '.md');
-        if (fs.existsSync(roleFile)) {
-          writeRoleState(name, roleState.mode);
+        if (roleExists(name)) {
+          setRoleOverride(key, name);
           if (state.roleLoaded) delete state.roleLoaded[key];
           saveState();
-          await sendToQQ(key, `已切换角色：${name}。`);
-          appendActivity(`${key} 管理员自动切换角色：${name}`);
+          await sendToQQ(key, `已切换本会话人格：${name}。`);
+          appendActivity(`${key} 管理员设置会话人格：${name}`);
         } else {
           await sendToQQ(key, `角色「${em[1]}」不存在。可用角色：${listRoles().join('、') || '（无）'}。`);
         }
@@ -7431,87 +7651,9 @@ async function main() {
         ? `${event.sender?.card || event.sender?.nickname || String(event.user_id)}：${textContent}`
         : textContent)
       + mediaHintFor(key, messageRef, mediaList)
-      + (isOwnerToolsKey(key) ? '\n\n' + ADMIN_SPACE_SPLIT_HINT : '');
+      + (isOwnerToolsKey(key) ? '\n\n' + ADMIN_SPACE_SPLIT_HINT + '\n' + ownerPersonaHint(key) + '\n' + OWNER_REPORT_RULES : '');
 
     appendActivity(`${key} ${isOwner ? '管理员' : '群友'} ${event.sender?.nickname || event.user_id}：${textContent.slice(0, 80)}`);
-
-    // 仿真群友模式：reserved 走状态机（观望/活跃/试探/退场）
-    if (isSocialEnabled()) {
-      const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
-      appendRecentMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, mediaList, messageRef); // AI 始终感知
-      const st = socialState(key);
-
-      // 退场中：收尾发言发出前不再接话，新消息进入摘要
-      if (st.phase === 'exiting') {
-        appendSummary(key, sender, textContent, plainContent, isOwner, mediaList, messageRef);
-        log(`社交模式：${key} 退场中，新消息转入摘要`);
-        return;
-      }
-
-      // 活跃超时：即使群里一直有人说话，到达随机上限后也主动收尾退场
-      if (st.phase === 'active' && triggerActiveDurationExit(key, st, Date.now())) {
-        appendSummary(key, sender, textContent, plainContent, isOwner, mediaList, messageRef);
-        log(`社交模式：${key} 活跃超时退场中，新消息转入摘要`);
-        return;
-      }
-
-      // 活跃 / 试探中：有新消息 → 保持活跃（或从试探回到活跃）
-      if (st.phase === 'active' || st.phase === 'probing') {
-        st.phase = 'active';
-        st.lastActiveMessageAt = Date.now();
-        st.probeDeadline = 0;
-        // 私聊：发给你就是叫你，直接即时投递，不等轮询、不参与沉默
-        if (kind === 'private') {
-          const promptText = `${roleHint ? roleHint + '\n\n' : ''}${isOwner ? '【管理员】' : ''}${textContent}${mediaHintFor(key, messageRef, mediaList)}`;
-          scheduleSocialReply(
-            key, promptText,
-            Number(cfg.social?.activeReplyDelayMinMs ?? 2000),
-            Number(cfg.social?.activeReplyDelayMaxMs ?? 8000),
-            '私聊即时回应',
-            false,
-            mediaList
-          );
-          log(`社交模式：${key} 私聊活跃中收到消息，即时投递`);
-          return;
-        }
-        log(`社交模式：${key} 活跃中收到消息，等待批量检测`);
-        return;
-      }
-
-      // 启动阶段（观望）：触发条件 ① 明确对 AI 说（含引用机器人自己） ② 普通消息小概率
-      // 指向性判断只基于当前消息自己的文字，不把引用原文算作“在叫 AI”
-      const direct = isDirectAddress(plainContent, event, kind) || quoteTargetIsSelf;
-      const randomTrigger = Math.random() < Number(cfg.social?.triggerProbability ?? 0.15);
-      if (!direct && !randomTrigger) {
-        appendSummary(key, sender, textContent, plainContent, isOwner, mediaList, messageRef);
-        log(`社交模式：观望中未触发 ${key}（${sender}：${plainContent.slice(0, 40)}）`);
-        return;
-      }
-
-      // 触发成功：进入活跃，贴最近上下文 + 当前消息 + 人格（仅此一次），让 AI 回复
-      enterActive(key);
-      const roleHint = currentRoleHintFor(key);
-      const currentLine = (isOwner && kind === 'private') ? `【管理员】${sender}：${textContent}` : `${sender}：${textContent}`;
-      const directionHint = textContent.includes('[引用') ? DIRECTION_HINT + '\n' : '';
-      const replyInstruction = direct
-        ? `请回复消息。\n${directionHint}${SPACE_SPLIT_HINT}`
-        : `请根据情况决定是否回复。如果不需要回应、想潜水/不接话，请只输出 ${SILENT_MARKER}；否则正常回复。\n${directionHint}${SPACE_SPLIT_HINT}`;
-      const promptText = `${roleHint ? roleHint + '\n\n' : ''}【群聊上下文】\n${buildContextBlock(key)}\n【当前消息】${currentLine}${mediaHintFor(key, messageRef, mediaList)}\n\n${replyInstruction}`;
-      if (isOwner && kind === 'private') {
-        log(`社交模式：管理员私聊触发，立即投递 ${key}`);
-        await deliverPrompt(key, promptText, { media: mediaList });
-      } else {
-        scheduleSocialReply(
-          key, promptText,
-          Number(cfg.social?.activeReplyDelayMinMs ?? 2000),
-          Number(cfg.social?.activeReplyDelayMaxMs ?? 8000),
-          '触发进入活跃',
-          false,
-          mediaList
-        );
-      }
-      return;
-    }
 
     // DSH 重启容错：DSH 不可用时消息入队（不丢），恢复后自动补投
     if (!dshReady) {
@@ -7542,7 +7684,9 @@ async function main() {
       throw error;
     }
     let content = [{ type: 'text', text: withSlangContext(promptText) }];
-    if (Array.isArray(mediaList) && mediaList.length > 0) {
+    // 二代 reserved2 不做自动内联：mediaHint 已提示 AI 按需调 qq_get_message_images，
+    // 避免消息末尾再拼一段 [表情:名字] + 图片，造成冗余与噪音。一代 chat/reserved 保持自动内联。
+    if (Array.isArray(mediaList) && mediaList.length > 0 && currentMode !== 'reserved2') {
       const imageParts = await resolveMediaList(mediaList);
       content = [{ type: 'text', text: withSlangContext(promptText) }, ...imageParts];
     }
@@ -7697,6 +7841,13 @@ async function main() {
       suffix: event.suffix
     });
     appendActivity(`${key} 拍一拍事件：${msg.text.slice(0, 80)}`);
+    // 管理员工具会话：戳一戳直接投递给 AI 回应（不走仿真唤醒——仿真唤醒对工具会话是被禁用的），
+    // 让管理员私聊里被戳也能像群聊一样自然回应，可用 qq_send_poke 回戳。
+    if (isOwnerToolsKey(key)) {
+      const pokePrompt = `【管理员】${msg.text}\n管理员拍了拍你，可以自然回应一句；想的话也能用 qq_send_poke 回一个拍一拍。\n\n${ADMIN_SPACE_SPLIT_HINT}\n${ownerPersonaHint(key)}`;
+      deliverPrompt(key, pokePrompt).catch((error) => log(`管理员拍一拍投递失败 ${key}: ${error?.message ?? error}`));
+      return;
+    }
     if (currentMode !== 'reserved2') return;
     if (socialV2.paused) return;
     const st = getSocialV2State(key);
@@ -8029,6 +8180,12 @@ async function main() {
                   if (isOwnerToolsKey(key)) {
                     // 管理员工具会话：回复自动转发（同 chat 模式），管理员可直接看到助手输出；
                     // 支持空格分条连发（仅“空格两侧都是汉字”才拆条，避免中英混排被误拆）。
+                    // AI 输出 [SILENT] 表示主动选择静默（如主动搭话时决定不打扰），不转发任何消息。
+                    if (isSilentMarker(plain)) {
+                      log(`[管理员工具会话] AI 选择静默（${SILENT_MARKER}）(${key})`);
+                      appendActivity(`${key} [管理员工具会话] AI 选择静默`);
+                      continue;
+                    }
                     log(`[管理员工具会话] 回复 (${key}) ${plain.length} 字`);
                     appendActivity(`${key} [管理员工具会话] 回复：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
                     const adminParts = splitByCjkSpacesBothSides(plain);

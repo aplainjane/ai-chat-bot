@@ -2,6 +2,10 @@
 
 > 让 DeepSeek Harness（DSH）的 agent 以“仿真群友”身份接入 QQ 群/私聊。
 > 本文是面向公开仓库的精简版说明；本地开发历史、个人配置与运行状态不会包含在仓库中。
+>
+> ⚠️ **版本说明**：当前版本已精简为单一“群友模式”（内部标识 `reserved2`），并移除了
+> `chat` / `closed-agent` / `reserved`（一代仿真）等旧模式。本文档部分章节（如“社交状态机”）
+> 描述的仍是早期版本的架构，仅作设计背景参考，与当前实现不完全一致。
 
 ---
 
@@ -72,7 +76,7 @@ qq-bridge/
 │   ├── PROJECT_GUIDE.md        # 本文档（公开版）
 │   └── DSH_SETUP.md            # DSH 端安装说明（另一台设备）
 ├── dsh/
-│   └── agent-presets/          # qq-chat / qq-chat-v2 的 DSH preset 模板
+│   └── agent-presets/          # qq-chat / qq-chat-v2 / qq-admin 的 DSH preset 模板
 ├── plugins/
 │   └── qq-mode-console/        # DSH 设置页 qq-mode 卡片插件
 ├── assets/
@@ -159,7 +163,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | 模块 | 说明 |
 |---|---|
 | `loadConfig` | 读取 `config.json`，fail-fast；提供社交参数默认值 |
-| `allowed` / `modeAllowed` | 白名单 + 模式准入（closed-agent 仅 owner 私聊） |
+| `allowed` / `modeAllowed` | 白名单 + 群友模式准入 |
 | `acquireLock` / `releaseLock` | 单实例锁（原子 `fs.openSync('wx')` + stale 检测） |
 | `ensureSession` | 创建/复用 DSH 会话，带 `sessionEpoch` 防止 reset 竞态 |
 | `social` | 社交引擎状态（states / recentMessages / pendingSummaries / silentContext / silentTurns / pendingTimers） |
@@ -171,7 +175,13 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `startConsoleServer` | 本地控制台 HTTP 服务 + API |
 | `flushSummaries` | 观望期未参与消息 → 摘要投喂（静默 turn） |
 
-### 5.2 社交状态机
+### 5.2 管理员工具会话
+
+当 `ownerQQ` 匹配发送者且 `dsh.ownerTools: true` 时，管理员私聊使用 `qq-admin` preset。它不挂普通 QQ 会话的工具限制，可以使用 PowerShell、文件、后台任务、技能和网页抓取等 DSH 本地工具。
+
+管理员会话使用 `dsh.ownerWorkspace` 作为工作目录；未配置时回退到 `sessionCwd`，再回退到 `state/agents`。新消息以 `steer` 模式投递，可直接补充正在执行的任务。该规则优先于群友模式，因此管理员私聊不走未读池，而是直接即时问答。
+
+### 5.3 社交状态机
 
 ```
         观望 idle
@@ -191,7 +201,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 - **冷场**：`idleWindowMs` 内无新消息 → 大概率回观望，小概率进试探。
 - **试探**：AI 主动说一句，`idleRetryWaitMs` 内无人回应则回观望。
 
-### 5.3 分条发送 / 错落感
+### 5.4 分条发送 / 错落感
 
 `planSocialTimeline(text, cfg)` 返回 `{ main: string[], followUp: null }`：
 
@@ -201,7 +211,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 4. 单条消息只做 `maxReplyChars`（默认 500 字）安全硬拆。
 5. `sendBurstToQQ` 按随机间隔发送，有概率用长间隔；最后一条后不 sleep。
 
-### 5.4 MCP 工具
+### 5.5 MCP 工具
 
 `mcp-snowluma-safe.js` 给 DSH agent 暴露：
 
@@ -226,7 +236,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 `mcp-host-server.js`：
 
 - `snowluma_status`：只读探活。
-- `start_snowluma` / `stop_snowluma`：默认禁用，需 `config.json` 设置 `snowluma.allowProcessControl: true`，且仅在 `closed-agent` 模式下可用。
+- `start_snowluma` / `stop_snowluma`：默认禁用，需 `config.json` 设置 `snowluma.allowProcessControl: true`；仅 `qq-admin`（管理员）会话可用，`qq-chat-v2` 会话会被工具白名单拒绝。
 
 `mcp-web-search-safe.js`：
 
@@ -246,6 +256,8 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `snowluma.accessToken` | OneBot 鉴权 token，未配置留空 |
 | `snowluma.launcherPath` / `homeDir` | SnowLuma 启动脚本与安装目录（进程管理用，默认禁用） |
 | `ownerQQ` | 管理员 QQ（最高权限，可在控制台「白名单 / 管理员」设置） |
+| `dsh.ownerTools` | 是否让管理员私聊使用 `qq-admin` 完整工具 preset；示例默认 false，确认工作目录后再开启 |
+| `dsh.ownerWorkspace` | 管理员工具会话的工作目录，建议限制在需要操作的项目范围内 |
 | `agentPreset` | 聊天模式用的 DSH agent preset |
 | `workspaceTitle` | DSH 工作区名 |
 | `allow.private` / `allow.groups` | 白名单（QQ 号/群号数组） |
@@ -271,13 +283,14 @@ DSH 事件流（api.events.mux）→ pumpMux()
 3. **敏感审计**：`SENSITIVE_RE` 拦截路径/凭据；agent 回复、错误文本、审批/提问理由、MCP send 都会过。
 4. **管理命令**：`/` 命令仅 owner（ownerQQ 可在控制台设置）。
 5. **审批**：非 owner 不能通过审批；超时/覆盖会给 DSH 回执。
-6. **进程控制**：`start/stop_snowluma` 默认禁用；即使开启，也仅允许在 `closed-agent` 模式下调用。
+6. **进程控制**：`start/stop_snowluma` 默认禁用；即使开启，也仅允许 `qq-admin`（管理员）会话调用，普通会话会被工具白名单拒绝。
 7. **配置 fail-closed**：config.json 损坏直接退出；白名单默认不放行。
 8. **控制台鉴权**：可配 `consoleToken`；未配置时自动生成强 token。
 9. **只读联网搜索**：`mcp-web-search-safe.js` 只暴露 `web_search` / `web_fetch`，带 SSRF 防护。
 10. **黑话人工确认**：自动提取/联网研究的黑话默认 candidate，只有控制台确认后才注入聊天上下文。
 11. **日志脱敏**：日志统一经过 `redactSensitiveText`，不记录路径/凭据等敏感原文。
 12. **二代会话隔离**：每个二代会话生成独立 agent token，MCP 状态/发送工具必须携带 token。
+13. **管理员工具隔离**：`qq-admin` 只分配给配置的 `ownerQQ` 私聊；普通群聊和私聊继续使用受限 preset。
 
 ---
 

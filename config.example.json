@@ -3,7 +3,9 @@
     "baseUrl": "http://127.0.0.1:3080",
     "provider": "deepseek-official",
     "model": "deepseek-v4-flash-vision-exp",
-    "reasoningEffort": "max"
+    "reasoningEffort": "max",
+    "ownerTools": false,
+    "ownerWorkspace": "C:\\path\\to\\your\\workspace"
   },
   "snowluma": {
     "wsUrl": "ws://127.0.0.1:3001",
@@ -15,7 +17,7 @@
   },
   "ownerQQ": 123456789,
   "sessionCwd": "",
-  "agentPreset": "qq-chat",
+  "agentPreset": "qq-chat-v2",
   "workspaceTitle": "QQ 聊天",
   "allow": {
     "private": [
@@ -48,45 +50,9 @@
       8
     ],
     "injectMax": 8,
-    "learnerPreset": "qq-chat",
+    "learnerPreset": "qq-chat-v2",
     "workspaceTitle": "QQ 黑话学习",
     "autoResearch": true
-  },
-  "social": {
-    "maxReplyChars": 500,
-    "mustReplyKeywords": [
-      "deepseek",
-      "小鲸鱼",
-      "大肥鱼",
-      "鲸鱼",
-      "d指导",
-      "在吗"
-    ],
-    "contextWindow": 20,
-    "triggerProbability": 0.1,
-    "activeCheckMinMs": 8000,
-    "activeCheckMaxMs": 30000,
-    "idleWindowMs": 360000,
-    "idleRetryProbability": 0.4,
-    "proactiveEnabled": true,
-    "proactiveIdleThresholdMs": 1800000,
-    "proactiveCheckMinMs": 2700000,
-    "proactiveCheckMaxMs": 5400000,
-    "proactiveProbability": 0.2,
-    "activeReplyDelayMinMs": 1000,
-    "activeReplyDelayMaxMs": 5000,
-    "activeDurationEnabled": true,
-    "activeDurationMinMs": 1200000,
-    "activeDurationMaxMs": 3000000,
-    "skipProbability": 0.05,
-    "surrenderProbability": 0,
-    "idleRetryWaitMs": 120000,
-    "burstEnabled": true,
-    "burstIntervalMinMs": 1000,
-    "burstIntervalMaxMs": 3000,
-    "longGapProbability": 0.2,
-    "longGapMinMs": 5000,
-    "longGapMaxMs": 10000
   },
   "socialV2": {
     "enabled": true,

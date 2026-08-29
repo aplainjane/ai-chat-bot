@@ -258,7 +258,7 @@ server.tool(
     groupId: z.union([z.number(), z.string()]).describe('群号（必须在白名单内）'),
     message: z.string().describe('消息文本，纯文本，不要用 Markdown 或 CQ 码'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；管理员/owner 私聊可省略）')
   },
   async ({ groupId, message, replyToMessageId, token }) => {
     try {
@@ -281,7 +281,7 @@ server.tool(
     groupId: z.union([z.number(), z.string()]).describe('群号（必须在白名单内）'),
     replyToMessageId: z.union([z.number(), z.string()]).describe('被引用/回复的消息 id（非零整数，可为负数）'),
     message: z.string().describe('要发送的文本，纯文本，不要用 Markdown 或 CQ 码'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；管理员/owner 私聊可省略）')
   },
   async ({ groupId, replyToMessageId, message, token }) => {
     try {
@@ -304,7 +304,7 @@ server.tool(
     userId: z.union([z.number(), z.string()]).describe('好友 QQ 号（必须在白名单内）'),
     message: z.string().describe('消息文本，纯文本，不要用 Markdown 或 CQ 码'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；closed-agent 模式不需要）')
+    token: z.string().optional().describe('二代会话令牌（reserved2 模式下必填；管理员/owner 私聊可省略）')
   },
   async ({ userId, message, replyToMessageId, token }) => {
     try {
@@ -477,7 +477,7 @@ server.tool(
   '统一发送工具：可发一条或多条，可引用某条消息，可自定义/按字数计算条间时间差。二代仿真模式专用。注意：字符串=一条消息，数组=多条消息；每个字符串内部不要用空格分隔中文短句，需要多条请用数组元素；每条消息要读起来完整，不要把同一句话拆到两条里。只有以下情况才需要传 replyToMessageId 引用：① 你这条消息指向的人或消息并非最新一条别人的消息（也就是你在回更早的某条）；② 你连续几句话里不同消息指代的是不同的消息或不同的人。其他情况（上下文唯一、刚在接同一条最新消息）不要引用，别让对方猜，也别为了用工具而用。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
-    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    token: z.string().optional().describe('二代会话令牌（reserved2 下必填；管理员/owner 私聊可省略）'),
     messages: z.union([z.string(), z.array(z.string()).min(1)]).describe('要发送的内容：字符串=一条；数组=分多条'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
     atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中用于点名某个人；与引用二选一即可，不要滥用）'),
@@ -508,7 +508,7 @@ server.tool(
       const data = await agentApi('/api/socialV2/send-message', {
         method: 'POST',
         body: JSON.stringify({ key, messages: finalMessages, replyToMessageId, atUserId: atUserId ?? null, gapMode, gapMs, gaps }),
-        headers: { 'x-agent-token': token },
+        headers: token ? { 'x-agent-token': token } : {},
         timeoutMs: 300000
       });
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
@@ -1024,14 +1024,14 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
     '查看当前会话中出现的合并转发消息/聊天记录内容（只读）。当消息文本里出现 `[转发消息 id=...]`，或 `qq_get_unread_messages` / `qq_get_recent_messages` / `qq_get_message_detail` 返回的某条消息带 `forwardIds` / `hasForward: true` 时调用。只能查看当前会话确实收到过的转发消息 id，不能任意读取。返回内容会包含每条消息的 text、media（图片/表情元数据）与 nestedForwardIds；如果合并转发里有图片，工具会直接把最多 5 张图片以图像内容返回给视觉模型；如果里面有嵌套合并转发，会附带嵌套转发 id 和前几条预览，必要时可继续用本工具查看嵌套 id。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
-      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      token: z.string().optional().describe('二代会话令牌（reserved2 下必填；管理员/owner 私聊可省略）'),
       id: z.string().describe('合并转发消息 id（来自消息里的 [转发消息 id=...] 或 forwardIds 数组）')
     },
     async ({ key, token, id }) => {
       try {
         const q = new URLSearchParams({ key, id: String(id) });
         const data = await agentApi(`/api/socialV2/forward-message?${q.toString()}`, {
-          headers: { 'x-agent-token': token },
+          headers: token ? { 'x-agent-token': token } : {},
           timeoutMs: 120000
         });
         const content = [{ type: 'text', text: JSON.stringify(data, null, 2) }];

@@ -27,3 +27,7 @@ config.json
 /scripts/patch-qq-chat-v2-presleep.mjs
 /scripts/patch-qq-chat-v2-stickers.mjs
 /scripts/patch-web-mcp-timeout.mjs
+/scripts/cleanup-owner-session.mjs
+
+# Internal operating rules (outdated/mojibake, not part of public project)
+/RULES.md

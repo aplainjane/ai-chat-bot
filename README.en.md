@@ -20,11 +20,11 @@ QQ messages ──► SnowLuma (OneBot v11 WS) ──► qq-bridge ──► DSH
 ## Features
 
 - Bridges QQ group/private messages to DSH agent sessions.
-- Social simulation mode ("simulated group friend") with idle/active/probing/exiting states.
+- Simulated group-friend mode: the AI decides by itself whether to speak, reads unread/recent messages via tools, replies, waits, dives, and sets its own next wake conditions.
 - Space-based message splitting for more natural multi-message replies.
 - Whitelist/blacklist access control, fail-closed by default.
 - Sensitive text audit prevents paths/credentials from being sent to QQ.
-- MCP tools for reading group history/members, sending messages, replying with quotes, and (in `reserved2`) full simulated-group-friend tooling.
+- MCP tools for reading unread/recent messages and group members, sending messages, replying with quotes, sticker handling and more.
 - Slang/network-expression learning with human confirmation.
 - Lightweight memory system for active topics, pending thoughts and member impressions.
 - Sticker library integration with AI-friendly sticker usage.
@@ -69,7 +69,7 @@ Or double-click `start.bat` on Windows (guard mode with auto-restart).
 
 ## DSH Setup on Another Device
 
-The bridge and console can run without extra DSH setup, but the two DSH chat presets (`qq-chat` and `qq-chat-v2`) and the MCP servers must be installed into DSH once per machine:
+The bridge and console can run without extra DSH setup, but the DSH agent presets (`qq-chat-v2` and `qq-admin`) and the MCP servers must be installed into DSH once per machine:
 
 ```bash
 node scripts/setup-dsh.mjs
@@ -77,10 +77,10 @@ node scripts/setup-dsh.mjs
 
 This installs:
 
-- `~/.dsh/.agent-presets/qq-chat` and `~/.dsh/.agent-presets/qq-chat-v2`
+- `~/.dsh/.agent-presets/qq-chat-v2` and `~/.dsh/.agent-presets/qq-admin`
 - MCP entries in `~/.dsh/profiles/web/cordis.patch.yml`
 - `qq-mode-console` in the profile `package.json`
-- Default DSH mode set to `reserved2` (second-generation simulation), with a local `state/mode.json` fallback
+- Default DSH mode set to `reserved2` (simulated group-friend mode), with a local `state/mode.json` fallback
 
 Then restart DSH. See [docs/DSH_SETUP.md](docs/DSH_SETUP.md) for details.
 
@@ -89,7 +89,7 @@ Then restart DSH. See [docs/DSH_SETUP.md](docs/DSH_SETUP.md) for details.
 - `config.json` and `state/` are **never committed**; the repository only ships `config.example.json`.
 - MCP send tools enforce whitelist checks and reject CQ-code injection.
 - Local paths, credentials, tokens and other sensitive patterns are filtered by the audit layer.
-- Process control for SnowLuma (`start_snowluma` / `stop_snowluma`) is disabled by default and only allowed in `closed-agent` mode when explicitly enabled.
+- Process control for SnowLuma (`start_snowluma` / `stop_snowluma`) is disabled by default and only used when `snowluma.allowProcessControl` is explicitly enabled.
 - The console uses a generated token when none is configured.
 
 ## Repository Layout
@@ -99,7 +99,7 @@ qq-bridge/
   config.example.json   # sanitized config template (real config.json is not in repo)
   docs/
     PROJECT_GUIDE.md    # detailed Chinese guide
-  dsh/agent-presets/    # qq-chat / qq-chat-v2 DSH agent preset templates
+  dsh/agent-presets/    # qq-chat-v2 / qq-admin DSH agent preset templates
   plugins/qq-mode-console  # DSH settings qq-mode card plugin
   src/                  # bridge core and MCP servers
   public/

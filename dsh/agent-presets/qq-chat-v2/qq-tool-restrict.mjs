@@ -42,6 +42,14 @@ const SAFE_PREFIXES = [
   'mcp__web-search-safe__',
 ]
 
+// 进程控制工具（启停 SnowLuma 网关）只允许管理员使用（qq-admin 完整工具 preset）：
+// 群聊/普通会话通过这里精确拒绝，防止群友诱导启停网关。工具仅在
+// snowluma.allowProcessControl=true 时注册；未注册时 restrict 会自动跳过。
+const PROCESS_CONTROL_TOOLS = [
+  'mcp__snowluma-host__start_snowluma',
+  'mcp__snowluma-host__stop_snowluma',
+]
+
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
 const SAFE_EXACT = new Set([
@@ -54,7 +62,7 @@ export function apply(ctx) {
   //    不会误删 preset 自己注册的 scoped 工具）。
   // 逐个 restrict：当前 DSH 版本不存在的工具名会单独抛错并跳过，
   // 不会导致整批限制失败（restrict 的 unknown 校验是整批原子性的）。
-  for (const name of KNOWN_DANGEROUS_GLOBAL_TOOLS) {
+  for (const name of [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...PROCESS_CONTROL_TOOLS]) {
     try {
       ctx.tools.restrict({ deny: [name] })
     } catch (error) {

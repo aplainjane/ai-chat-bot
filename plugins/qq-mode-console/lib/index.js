@@ -2,7 +2,7 @@
 //
 // 通过 DSH 官方用户设置扩展点（ctx.settings.register）暴露一个
 // `qq-mode` 命名空间。WebUI 的设置页会自动渲染该命名空间的配置卡片，
-// 用户在那里切换桥接模式（chat / closed-agent / 仿真模式，内部标识 reserved），
+// 用户在那里查看当前桥接模式（群友模式，内部标识 reserved2），
 // 桥接进程通过 DSH settings API 轮询读取。本插件不修改任何 WebUI 内核。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,7 +25,7 @@ export const inject = ['settings'];
 export const QQMODE_NAMESPACE = 'qq-mode';
 
 export const QqModeSchema = z.object({
-  mode: z.union([z.const('chat'), z.const('closed-agent'), z.const('reserved'), z.const('reserved2')]).default('reserved2'),
+  mode: z.const('reserved2').default('reserved2'),
   ownerQQ: z.string().description('管理员 QQ（ownerQQ）；留空表示不通过 DSH 设置覆盖 config.json'),
 });
 

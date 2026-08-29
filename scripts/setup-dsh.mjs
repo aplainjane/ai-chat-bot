@@ -2,7 +2,7 @@
 // setup-dsh.mjs — 在目标设备上安装 qq-bridge 的 DSH 端配置
 //
 // 功能：
-//   1. 安装两套 agent preset：qq-chat、qq-chat-v2
+//   1. 安装两套 agent preset：qq-chat-v2、qq-admin
 //   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
 //      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
 //   3. 在 profile package.json 中注册 qq-mode-console 插件
@@ -195,7 +195,7 @@ function ensureLocalModeFile() {
     return;
   }
   ensureDir(stateDir);
-  fs.writeFileSync(modeFile, `${JSON.stringify({ mode: 'reserved2', closedAgentPreset: 'router-standard' }, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(modeFile, `${JSON.stringify({ mode: 'reserved2' }, null, 2)}\n`, 'utf8');
   log(`state/mode.json created with mode=reserved2 (fallback if DSH settings are not available)`);
 }
 
@@ -219,8 +219,8 @@ function autoInstallProfileBundles() {
   }
 }
 
-copyPreset('qq-chat');
 copyPreset('qq-chat-v2');
+copyPreset('qq-admin');
 patchCordis();
 const pluginLink = ensurePluginLink();
 patchProfilePackage(pluginLink);
