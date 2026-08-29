@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
@@ -56,6 +57,25 @@ const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+
+// ── 重启 DSH：spawn 独立 ps1（DSH 被杀后脚本仍继续完成重启），约 10 秒恢复 ──
+function scheduleDshRestart() {
+  try {
+    const script = path.join(ROOT, 'scripts', 'restart-dsh.ps1');
+    const pwshPath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script];
+    // 关键：不能用 detached / windowsHide！实测这两个参数会让 powershell -File
+    // 启动后不执行脚本（detached 静默 exit 0；windowsHide 启动失败 0xC0000142）。
+    // ps1 内部用绝对路径写日志，不依赖 stdio 重定向。
+    const child = spawn(pwshPath, args, { stdio: 'ignore', cwd: path.dirname(script) });
+    child.on('error', (err) => { log(`重启 DSH：powershell 启动失败: ${err.message}`); });
+    child.on('exit', (code, signal) => { log(`重启 DSH：powershell 退出 code=${code} signal=${signal ?? ''}`); });
+    child.unref();
+    log(`重启 DSH：已 spawn ${pwshPath} -File ${script}`);
+  } catch (error) {
+    log(`重启 DSH 失败: ${error?.message ?? error}`);
+  }
+}
 
 // 读取 JSON 文件并容错：Windows 下常见 UTF-8 BOM（\uFEFF）会令 JSON.parse 失败。
 // required=true 时文件缺失或解析失败直接抛错（用于启动必需配置，fail-fast）。
@@ -955,6 +975,116 @@ async function main() {
     stickerEntries = updated.entries;
     saveStickerStoreSafe();
     return { entry: updated.entry, messageId: data?.message_id ?? null };
+  }
+
+  // 发送一张本地图片或网络图片（发 image 段）。imageRef 支持：
+  // - 本地绝对路径（含盘符或路径分隔符），如 F:\deepseek harness\workspace\a.png
+  // - file:// URL
+  // - http(s) 图片 URL（会做 SSRF 防护校验）
+  // - 图片存档库（qq-bridge/images/，gitignore）里的文件名，如 a.png —— 供群友机器人使用
+  function imageLibDir() {
+    const rel = cfg.socialV2?.images?.dir || 'images';
+    return path.resolve(ROOT, rel);
+  }
+  function listImageLibrary() {
+    const dir = imageLibDir();
+    if (!fs.existsSync(dir)) return [];
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return []; }
+    return names
+      .filter((n) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(n))
+      .map((name) => {
+        const full = path.join(dir, name);
+        let size = 0, mtime = 0;
+        try { const st = fs.statSync(full); size = st.size; mtime = st.mtimeMs; } catch {}
+        return { name, size, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  }
+  async function sendImageV2(key, imageRef, options = {}) {
+    const [kind, id] = key.split(':');
+    const src = String(imageRef ?? '').trim();
+    if (!src) throw new Error('图片路径/URL 不能为空');
+    // 传给 OneBot 的 file：本地图用解析后的绝对路径，URL 用原 URL。
+    let finalFile = src;
+    if (/^https?:\/\//i.test(src)) {
+      // 网络图片：只做 SSRF 防护校验（OneBot 自行抓取）。
+      await validateFetchUrl(src);
+    } else {
+      // 本地图片：解析 file:// 前缀后校验存在、大小、确实为图片。
+      let p = src;
+      if (/^file:\/\//i.test(p)) p = p.replace(/^file:\/\//i, '').replace(/^localhost/i, '');
+      if (!/^[A-Za-z]:[\\/]/.test(p) && !/^[\\/]/.test(p)) {
+        // 不是绝对路径 → 尝试按图片存档库（qq-bridge/images/）里的文件名解析，供群友机器人发图。
+        const libPath = path.join(imageLibDir(), p);
+        if (fs.existsSync(libPath) && fs.statSync(libPath).isFile()) {
+          p = libPath;
+        } else {
+          throw new Error('imagePath 必须是本地图片绝对路径（如 F:\\xxx.png）、图片存档库文件名（如 a.png）或 http(s) 图片 URL');
+        }
+      }
+      if (!fs.existsSync(p)) throw new Error(`本地图片不存在：${p}`);
+      const stat = fs.statSync(p);
+      if (!stat.isFile()) throw new Error(`不是文件：${p}`);
+      if (stat.size <= 0) throw new Error(`图片文件为空：${p}`);
+      if (stat.size > 20 * 1024 * 1024) throw new Error(`图片文件过大（>20MB）：${p}`);
+      const fd = fs.openSync(p, 'r');
+      let head;
+      try {
+        head = Buffer.alloc(12);
+        fs.readSync(fd, head, 0, 12, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
+      if (!looksLikeImageBuffer(head)) throw new Error(`不是有效的图片文件（仅支持 PNG/JPEG/GIF/WebP）：${p}`);
+      finalFile = p;
+    }
+    const segments = [];
+    const replyToMessageId = options.replyToMessageId;
+    const atUserId = options.atUserId;
+    if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+      const rid = String(replyToMessageId).trim();
+      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
+      segments.push({ type: 'reply', data: { id: rid } });
+    }
+    if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
+      const at = String(atUserId).trim();
+      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+      segments.push({ type: 'at', data: { qq: at } });
+    }
+    segments.push({ type: 'image', data: { file: finalFile } });
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => {
+      sendResolve = resolve;
+      sendReject = reject;
+    });
+    sendChain = sendChain.then(async () => {
+      try {
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(20000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
+        }
+        sendResolve(body.data);
+      } catch (error) {
+        sendReject(error);
+      }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null, src };
   }
 
   // 更新本地 AI 认知（含义/标签/用法）。
@@ -2633,6 +2763,8 @@ async function main() {
             listStickers: 'qq_list_stickers',
             getStickerImage: 'qq_get_sticker_image',
             sendSticker: 'qq_send_sticker',
+            sendImage: 'qq_send_image',
+            listImages: 'qq_list_images',
             setStickerRemark: 'qq_set_sticker_remark',
             stickerNote: 'qq_sticker_note',
             collectSticker: 'qq_collect_sticker',
@@ -3475,6 +3607,119 @@ async function main() {
             log(`[sticker] 工具发送表情失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-image') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const imagePath = String(body.imagePath ?? '').trim();
+          const caption = String(body.message ?? body.caption ?? '').trim();
+          const replyToMessageId = body.replyToMessageId;
+          const atUserId = body.atUserId ?? null;
+          if (!key || !imagePath) { sendJson({ ok: false, error: 'key 和 imagePath 不能为空' }, 400); return; }
+          // 图片消息只能是图片，不能在同一气泡里附带文字。
+          if (caption) {
+            sendJson({ ok: false, error: '图片消息不能附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发图片' }, 400);
+            return;
+          }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('sendImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_image' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token'] && !isOwnerToolsKey(key)) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (kind === 'private' && atUserId) { sendJson({ ok: false, error: '私聊不需要 @' }, 400); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '' && !/^-?[1-9]\d*$/.test(String(replyToMessageId).trim())) {
+            sendJson({ ok: false, error: 'replyToMessageId 必须是非零整数（消息 id 可能为负数）' }, 400);
+            return;
+          }
+          let quotedInfo = null;
+          let actualReplyToMessageId = replyToMessageId;
+          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+            const stForReply = getSocialV2State(key);
+            const resolved = await resolveReplyTargetV2(stForReply, kind, id, String(replyToMessageId).trim());
+            if (!resolved) {
+              sendJson({ ok: false, error: '无法解析被引用消息，请确认 message id 正确且属于当前会话（可用 qq_get_message_detail 查看）' }, 400);
+              return;
+            }
+            quotedInfo = resolved.info;
+            actualReplyToMessageId = resolved.messageId;
+          }
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const now = Date.now();
+          try {
+            const st = getSocialV2State(key);
+            const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+            const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+            const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+            const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+            if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+              sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+              return;
+            }
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            const sent = await sendImageV2(key, imagePath, {
+              replyToMessageId: actualReplyToMessageId,
+              atUserId
+            });
+            const text = '[图片]';
+            st.recentMessages.push({
+              messageId: sent.messageId ? String(sent.messageId) : null,
+              sender: '我',
+              text,
+              plain: text,
+              quoteTargetIsSelf: false,
+              isOwner: true,
+              ownerLabel: '我',
+              isSelf: true,
+              media: [],
+              hasMedia: false,
+              forwardIds: [],
+              hasForward: false,
+              time: Date.now()
+            });
+            const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
+            if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            st.wakeConfig.noActionCount = 0;
+            st.preSleepWaitSatisfiedAt = 0;
+            st.preSleepWaitObservedAt = 0;
+            st.preSleepWaitAccumMs = 0;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            log(`[image] 工具发送图片 ${key}: ${sent.src}`);
+            appendActivity(`${key} [image] 工具发送图片`);
+            sendJson({ ok: true, key, sent: 1, failed: 0, quoted: quotedInfo, src: sent.src });
+          } catch (error) {
+            const st = getSocialV2State(key);
+            const idx = st.sendTimes.indexOf(now);
+            if (idx >= 0) st.sendTimes.splice(idx, 1);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            saveSocialV2State();
+            log(`[image] 工具发送图片失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `发送图片失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // ── 图片存档库列表（MCP qq_list_images 走这里）：列出 qq-bridge/images/ 里的可用图片 ──
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/list-images') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('listImages')) { sendJson({ ok: false, error: '工具未启用：qq_list_images' }, 403); return; }
+          const files = listImageLibrary();
+          sendJson({ ok: true, dir: imageLibDir(), count: files.length, files });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
@@ -4501,6 +4746,15 @@ async function main() {
             log('控制台：重启桥接');
             releaseLock();
             process.exit(0);
+          }, 500);
+          return;
+        }
+        // ── 重启 DSH（spawn 独立脚本，DSH 被杀后脚本仍继续完成重启） ──────────
+        if (req.method === 'POST' && url.pathname === '/api/dsh/restart') {
+          sendJson({ ok: true, message: '正在重启 DSH…（约 10 秒后恢复，DSH 会重新加载插件与 MCP 工具）' });
+          setTimeout(() => {
+            log('控制台：重启 DSH');
+            scheduleDshRestart();
           }, 500);
           return;
         }
@@ -7535,6 +7789,14 @@ async function main() {
     if (isOwner && !plainContent.startsWith('/')) {
       const roleText = plainContent.trim();
       const roleExists = (name) => fs.existsSync(path.join(ROOT, 'roles', name + '.md'));
+      // 重启 DSH：直接执行（不经 AI），约 10 秒后恢复。支持「重启dsh / 重启 DSH / 重启 / 重启你 / restart」。
+      const restartDshRe = /^(?:重启|restart)\s*(?:dsh|DSH|服务|我|你)?[！!。.]?\s*$/;
+      if (restartDshRe.test(roleText)) {
+        await sendToQQ(key, '正在重启 DSH（约 10 秒后恢复）…');
+        appendActivity(`${key} 管理员命令：重启 DSH`);
+        setTimeout(scheduleDshRestart, 500);
+        return;
+      }
       // 查看可用角色卡列表
       const listRolesRe = /^(?:查看|显示|列出)\s*(?:角色卡|可用角色|角色列表)[！!。.]?\s*$/;
       if (listRolesRe.test(roleText)) {

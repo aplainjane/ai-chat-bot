@@ -31,3 +31,6 @@ config.json
 
 # Internal operating rules (outdated/mojibake, not part of public project)
 /RULES.md
+
+# Image archive library (gitignored per admin request)
+/images/
