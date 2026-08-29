@@ -7970,6 +7970,19 @@ async function main() {
                 }
               }
             }
+            // DSH 端（Web 管理界面）已解决审批：清理 QQ 侧挂起，避免管理员在 QQ 端被反复
+            // 提示"请回复通过或拒绝"处理一个其实已在 DSH 侧解决的审批。
+            if (frame.event.type === 'approval/decided') {
+              const decidedId = frame.event.data?.id;
+              if (decidedId != null) {
+                const pendingEntry = pending.get(key);
+                if (pendingEntry && pendingEntry.kind === 'approval' && String(pendingEntry.approvalId) === String(decidedId)) {
+                  clearTimeout(pendingEntry.timer);
+                  pending.delete(key);
+                  log(`审批已在 DSH 端解决（${frame.event.data?.outcome ?? 'decided'}），清除 QQ 挂起 (${key})`);
+                }
+              }
+            }
             const collector = collectors.get(frame.sessionId) ?? createTurnCollector();
             collectors.set(frame.sessionId, collector);
             const ended = collector.push(frame.event);
