@@ -1020,15 +1020,14 @@ async function main() {
     const [kind, id] = key.split(':');
     const src = String(imageRef ?? '').trim();
     if (!src) throw new Error('图片路径/URL 不能为空');
-    // 群友会话（群聊）图片统一走图库：只能发 qq-bridge/images/ 里的图片，
-    // 图库外的本地图（如会话截图）自动收录进图库再发；网络 URL 一律拒绝。
+    // 群友会话（群聊）图片规则：允许网络图片；本地图片仅限图库 images/ 内的；
+    // 会话自己的截图（state/agents 工作区）自动收录进图库再发；其它本机图库外路径一律拒绝。
     const groupOnlyLibrary = kind === 'group' && cfg.socialV2?.images?.groupOnlyLibrary !== false;
     // 传给 OneBot 的 file：本地图用解析后的绝对路径，URL 用原 URL。
     let finalFile = src;
-    let sourceAbs = null; // 本地源绝对路径（群友收录后清理会话截图用）
+    let sourceAbs = null; // 本地源绝对路径（群友会话截图收录后清理用）
     if (/^https?:\/\//i.test(src)) {
-      if (groupOnlyLibrary) throw new Error('群友会话只能发送图库（qq-bridge/images/）里的图片，不支持网络图片 URL');
-      // 网络图片：只做 SSRF 防护校验（OneBot 自行抓取）。
+      // 网络图片：允许（仅 SSRF 防护校验，OneBot 自行抓取）。
       await validateFetchUrl(src);
     } else {
       // 本地图片：解析 file:// 前缀后校验存在、大小、确实为图片。
@@ -1060,19 +1059,23 @@ async function main() {
       finalFile = p;
       sourceAbs = p;
     }
-    // 群友会话：图片统一收录进图库（图库是唯一出口）。
+    // 群友会话：本地图片必须来自图库；会话自己的截图（state/agents）自动收录进图库再发。
     if (groupOnlyLibrary && sourceAbs) {
       const lib = path.resolve(imageLibDir());
       const rf = path.resolve(finalFile);
       if (rf !== lib && !rf.startsWith(lib + path.sep)) {
-        const libFile = ingestToLibrary(finalFile);
-        log(`[image] 群友图片收录进图库：${finalFile} -> ${libFile}`);
-        finalFile = libFile;
-        // 源文件在会话工作区（state/agents）下 → 发图后清理，避免截图重复积累。
         const agentsDir = path.resolve(STATE_DIR, 'agents');
         const ra = path.resolve(sourceAbs);
-        if (ra !== path.resolve(libFile) && (ra.startsWith(agentsDir + path.sep) || ra === agentsDir)) {
-          try { fs.unlinkSync(ra); log(`[image] 已清理会话截图源：${ra}`); } catch {}
+        if (ra.startsWith(agentsDir + path.sep) || ra === agentsDir) {
+          // 会话自己的截图 → 收录进图库再发，源文件清理（截图统一存图库）。
+          const libFile = ingestToLibrary(finalFile);
+          log(`[image] 群友截图收录进图库：${finalFile} -> ${libFile}`);
+          finalFile = libFile;
+          if (path.resolve(libFile) !== ra) {
+            try { fs.unlinkSync(ra); log(`[image] 已清理会话截图源：${ra}`); } catch {}
+          }
+        } else {
+          throw new Error('群友会话只能发送图库（qq-bridge/images/）内的图片或网络图片，不能发送本机其他路径的图片');
         }
       }
     }
