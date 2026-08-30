@@ -1001,13 +1001,33 @@ async function main() {
       })
       .sort((a, b) => b.mtime - a.mtime);
   }
+  // 把一张本地图片复制进图库（唯一命名防覆盖），返回图库内新路径。
+  function ingestToLibrary(filePath) {
+    const lib = imageLibDir();
+    fs.mkdirSync(lib, { recursive: true });
+    const ext = path.extname(filePath) || '.png';
+    const base = path.basename(filePath, ext) || 'image';
+    let target = path.join(lib, `${base}${ext}`);
+    let i = 1;
+    while (fs.existsSync(target)) {
+      target = path.join(lib, `${base}_${i}${ext}`);
+      i++;
+    }
+    fs.copyFileSync(filePath, target);
+    return target;
+  }
   async function sendImageV2(key, imageRef, options = {}) {
     const [kind, id] = key.split(':');
     const src = String(imageRef ?? '').trim();
     if (!src) throw new Error('图片路径/URL 不能为空');
+    // 群友会话（群聊）图片统一走图库：只能发 qq-bridge/images/ 里的图片，
+    // 图库外的本地图（如会话截图）自动收录进图库再发；网络 URL 一律拒绝。
+    const groupOnlyLibrary = kind === 'group' && cfg.socialV2?.images?.groupOnlyLibrary !== false;
     // 传给 OneBot 的 file：本地图用解析后的绝对路径，URL 用原 URL。
     let finalFile = src;
+    let sourceAbs = null; // 本地源绝对路径（群友收录后清理会话截图用）
     if (/^https?:\/\//i.test(src)) {
+      if (groupOnlyLibrary) throw new Error('群友会话只能发送图库（qq-bridge/images/）里的图片，不支持网络图片 URL');
       // 网络图片：只做 SSRF 防护校验（OneBot 自行抓取）。
       await validateFetchUrl(src);
     } else {
@@ -1038,6 +1058,23 @@ async function main() {
       }
       if (!looksLikeImageBuffer(head)) throw new Error(`不是有效的图片文件（仅支持 PNG/JPEG/GIF/WebP）：${p}`);
       finalFile = p;
+      sourceAbs = p;
+    }
+    // 群友会话：图片统一收录进图库（图库是唯一出口）。
+    if (groupOnlyLibrary && sourceAbs) {
+      const lib = path.resolve(imageLibDir());
+      const rf = path.resolve(finalFile);
+      if (rf !== lib && !rf.startsWith(lib + path.sep)) {
+        const libFile = ingestToLibrary(finalFile);
+        log(`[image] 群友图片收录进图库：${finalFile} -> ${libFile}`);
+        finalFile = libFile;
+        // 源文件在会话工作区（state/agents）下 → 发图后清理，避免截图重复积累。
+        const agentsDir = path.resolve(STATE_DIR, 'agents');
+        const ra = path.resolve(sourceAbs);
+        if (ra !== path.resolve(libFile) && (ra.startsWith(agentsDir + path.sep) || ra === agentsDir)) {
+          try { fs.unlinkSync(ra); log(`[image] 已清理会话截图源：${ra}`); } catch {}
+        }
+      }
     }
     const segments = [];
     const replyToMessageId = options.replyToMessageId;

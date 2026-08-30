@@ -910,11 +910,11 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
 if (cfg.socialV2?.tools?.sendImage !== false) {
   server.tool(
     'qq_send_image',
-    '在指定会话发送一张图片（群聊/私聊）。imagePath 支持：① 图片存档库文件名（如 a.png，来自 qq_list_images，群友常用，会到 qq-bridge/images/ 里找）② 本地图片绝对路径（如 F:\\\\xxx\\\\a.png）③ http(s) 图片 URL（会做安全校验）。注意：一条消息只能是一张图片，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发图片。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。',
+    '在指定会话发送一张图片（群聊/私聊）。imagePath 支持：① 图片存档库文件名（如 a.png，来自 qq_list_images，群友常用，会到 qq-bridge/images/ 里找）② 本地图片绝对路径（如 F:\\\\xxx\\\\a.png）③ http(s) 图片 URL（会做安全校验）。注意：群聊会话（群友机器人）只能发图库 images/ 里的图——图库外的本地图会自动收录进图库再发，网络 URL 会被拒绝；管理员私聊不受此限。一条消息只能是一张图片，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发图片。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-      imagePath: z.string().describe('图片存档库文件名（如 a.png）或本地绝对路径或 http(s) URL'),
+      imagePath: z.string().describe('图片存档库文件名（如 a.png）或本地绝对路径或 http(s) URL（群聊仅限图库图）'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
       atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）')
     },
