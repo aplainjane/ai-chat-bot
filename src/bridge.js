@@ -161,8 +161,8 @@ const SPACE_SPLIT_HINT = '想分多条消息时用空格分隔；不想分条就
 // 管理员工具会话（owner 私聊）专用分条提示：与 ADMIN_SPACE_SPLIT_HINT 发送侧规则一致，
 // 只有“空格两侧都是汉字”才拆条（中英混排不误拆）；单条超 500 字会按标点硬拆。
 const ADMIN_SPACE_SPLIT_HINT = '【分条规则】你回复里的空格会被当作分条信号：只有空格两侧都是汉字才会拆成两条消息；不想分条就别加空格、用标点连成一句。单条超过 500 字会按标点硬拆。';
-// 管理员工具会话常驻汇报规则：长任务分步实时汇报 + 每次重启后汇报。
-const OWNER_REPORT_RULES = '【汇报规则】① 长时间/多步任务进行中，每完成一步用发送工具（mcp__snowluma__qq_send_message，key 传当前会话）向管理员发一句简短进度（如“开始处理了”“改好了”“正在重启”），让管理员知道你还活着，不要等全部做完才一次性发结果；阶段汇报几小句即可，别刷屏。② 每次桥接或 DSH 重启完成后，主动向管理员汇报一句重启结果。';
+// 管理员工具会话常驻汇报规则：中间过程不手动汇报（实时转发自动发），仅重启成功后用发送工具汇报。
+const OWNER_REPORT_RULES = '【汇报规则】① 中间过程不需要用发送工具汇报，桥接会把你的回复文本实时转发给管理员。② 每次桥接或 DSH 重启完成后，由于重启后自动转发可能不可用，直接用发送工具（mcp__snowluma__qq_send_message，key 传当前会话）向管理员汇报一句重启结果。除重启外，其他过程都不需要主动用工具汇报。';
 // 管理员工具会话常驻人格提示：与群聊（v2 唤醒提示里的【当前角色】）一致，
 // 每次给管理员会话投递消息时附带当前人格名 + 查看工具，便于 AI 始终知道自己在扮演谁。
 function ownerPersonaHint(key) {
@@ -1496,6 +1496,13 @@ async function main() {
   const api = new NodeApiClient(cfg.dsh.baseUrl);
   const collectors = new Map(); // sessionId -> turn collector
   const sendToolSucceededSessions = new Set(); // sessionId：当前 turn 内 MCP 发送类工具至少成功一次
+  // 管理员工具会话实时转发状态：
+  // ownerStepBuffers：sessionId -> 该 turn 已产出但尚未发送的 assistant 文本缓冲（每步文本先进缓冲，
+  //   在下一个工具调用点冲刷，实现“一句话说完就发”）；发送类工具调用时丢弃缓冲（由工具自己投递，避免重复）。
+  // ownerStreamedSessions：sessionId 该 turn 已实时转发过文本，回合末自动转发须跳过，避免重复。
+  const ownerStepBuffers = new Map();
+  const ownerStreamedSessions = new Set();
+  const ownerProduced = new Map(); // sessionId -> 本 turn 已产出的 assistant 原始文本（供回合末兜底与 ended.text 对齐）
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
   const toolCallNames = new Map(); // sessionId -> Map<callId, toolName>：用于结果日志关联工具名
   const pendingSendToolCalls = new Map(); // sessionId -> Set<callId>：等待 tool/result 的发送类调用
@@ -2730,6 +2737,9 @@ async function main() {
               toolCallNames.delete(sid);
               pendingSendToolCalls.delete(sid);
               sendToolSucceededSessions.delete(sid);
+              ownerStepBuffers.delete(sid);
+              ownerStreamedSessions.delete(sid);
+              ownerProduced.delete(sid);
             }
             const removedV2 = socialV2.conversations.get(key);
             if (removedV2?.agentToken) KNOWN_AGENT_TOKENS.delete(removedV2.agentToken);
@@ -4687,6 +4697,9 @@ async function main() {
           collectors.delete(oldSessionId);
           sendToolSucceededSessions.delete(oldSessionId);
           pendingSendToolCalls.delete(oldSessionId);
+          ownerStepBuffers.delete(oldSessionId);
+          ownerStreamedSessions.delete(oldSessionId);
+          ownerProduced.delete(oldSessionId);
           v2TurnStartAt.delete(oldSessionId);
           toolCallNames.delete(oldSessionId);
           const pe = pending.get(key);
@@ -4771,6 +4784,9 @@ async function main() {
           collectors.clear();
           sendToolSucceededSessions.clear();
           pendingSendToolCalls.clear();
+          ownerStepBuffers.clear();
+          ownerStreamedSessions.clear();
+          ownerProduced.clear();
           v2TurnStartAt.clear();
           toolCallNames.clear();
           saveState();
@@ -6360,6 +6376,17 @@ async function main() {
     } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
       social.exitingSessions.delete(sessionId);
     }
+    // 管理员工具会话（reserved2）：投递用 steer 模式打断同一个回合，turn/end 可能迟迟不触发，
+    // 导致最终回复文本积压在缓冲里不被发送。这里在每次投递完成时冲刷缓冲兜底：
+    // 若本回合已成功用过发送类工具则丢弃缓冲（工具已自行投递），否则把剩余最终文本实时发出。
+    // 与事件流路径共用同一个缓冲，先到者消费后其他路径扑空，天然避免重复。
+    if (isOwnerToolsKey(key) && currentMode === 'reserved2') {
+      if (sendToolSucceededSessions.has(sessionId)) {
+        ownerStepBuffers.delete(sessionId);
+      } else {
+        await flushOwnerStepBuffer(key, sessionId, '投递完成实时转发');
+      }
+    }
     return { ok: true };
   }
 
@@ -7745,6 +7772,9 @@ async function main() {
           collectors.delete(old);
           sendToolSucceededSessions.delete(old);
           pendingSendToolCalls.delete(old);
+          ownerStepBuffers.delete(old);
+          ownerStreamedSessions.delete(old);
+          ownerProduced.delete(old);
           v2TurnStartAt.delete(old);
           toolCallNames.delete(old);
           social.silentTurns.delete(old);
@@ -8204,6 +8234,57 @@ async function main() {
     pending.set(key, entry);
   }
 
+  // 管理员工具会话：按空格分条 + 单行化 + 500 字硬拆发送一条文本（与旧回合末自动转发同一套规则）。
+  async function sendOwnerPlain(key, rawText, tag) {
+    const plain = mdToPlain(rawText).trim();
+    if (!plain) return;
+    if (isSilentMarker(plain)) return;
+    const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && plain.includes(t));
+    if (shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
+      log(`⚠️ ${tag}被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
+      return;
+    }
+    log(`[管理员工具会话] ${tag} (${key}) ${plain.length} 字`);
+    appendActivity(`${key} [管理员工具会话] ${tag}：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+    const adminParts = splitByCjkSpacesBothSides(plain);
+    const adminMessages = [];
+    for (const seg of adminParts) {
+      adminMessages.push(...splitLongSegment(seg, 500).map(singleLineForQQ));
+    }
+    const adminList = adminMessages.filter(Boolean);
+    if (adminList.length > 1) {
+      await sendBurstToQQ(key, adminList, { burstIntervalMinMs: 400, burstIntervalMaxMs: 1200, longGapProbability: 0.1, longGapMinMs: 2000, longGapMaxMs: 4000 });
+    } else if (adminList.length === 1) {
+      await sendToQQ(key, adminList[0]);
+    }
+  }
+
+  // 管理员工具会话实时转发：把缓冲的 assistant 文本立即发出（每步文本在下一个工具调用点冲刷）。
+  async function flushOwnerStepBuffer(key, sessionId, tag = '实时转发') {
+    const text = ownerStepBuffers.get(sessionId) ?? '';
+    ownerStepBuffers.delete(sessionId);
+    if (!text || !text.trim()) return;
+    ownerStreamedSessions.add(sessionId);
+    await sendOwnerPlain(key, text, tag);
+  }
+
+  // 管理员工具会话回合末兜底：用 turn collector 的 ended.text（权威完整文本）减去本 turn
+  // 已实时转发覆盖的文本，把任何未被实时转发送达的最终回复补发出去，确保最终回复永不丢失。
+  async function flushOwnerTurnFallback(key, sessionId, endedText) {
+    if (!endedText || !endedText.trim()) return;
+    const produced = ownerProduced.get(sessionId) ?? '';
+    let remaining = endedText;
+    if (produced && remaining.startsWith(produced)) {
+      remaining = remaining.slice(produced.length);
+    } else if (produced && produced.length >= remaining.length && remaining.startsWith(remaining)) {
+      // 不匹配前缀时的保守处理：不重复发送已实时发过的内容
+      remaining = '';
+    }
+    if (!remaining || !remaining.trim()) return;
+    ownerStreamedSessions.add(sessionId);
+    await sendOwnerPlain(key, remaining, '回合末兜底');
+  }
+
   // DSH 事件流 → QQ
   async function pumpMux() {
     for (;;) {
@@ -8243,6 +8324,9 @@ async function main() {
             if (frame.event.type === 'turn/start') {
               sendToolSucceededSessions.delete(frame.sessionId);
               pendingSendToolCalls.delete(frame.sessionId);
+              ownerStepBuffers.delete(frame.sessionId);
+              ownerStreamedSessions.delete(frame.sessionId);
+              ownerProduced.delete(frame.sessionId);
               v2TurnStartAt.set(frame.sessionId, Date.now());
             }
             if (frame.event.type === 'tool/call') {
@@ -8250,6 +8334,15 @@ async function main() {
               const callId = frame.event.data?.callId;
               const args = sanitizeToolArgs(frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data);
               appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args });
+              // 管理员工具会话实时转发：工具调用点是“该步文本说完了”的时刻。
+              // 发送类工具自己负责投递，丢弃该步文本缓冲；其余工具把该步进度文本立即发出。
+              if (isOwnerToolsKey(key)) {
+                if (isSendToolName(toolName)) {
+                  ownerStepBuffers.delete(frame.sessionId);
+                } else {
+                  await flushOwnerStepBuffer(key, frame.sessionId);
+                }
+              }
               if (callId != null) {
                 if (isSendToolName(toolName)) {
                   let pending = pendingSendToolCalls.get(frame.sessionId);
@@ -8294,6 +8387,19 @@ async function main() {
                 }
               }
             }
+            // 管理员工具会话实时转发：assistant/message（模型每步完整输出）把文本块放进缓冲，
+            // 等下一个工具调用点或回合末冲刷，实现“一句话说完就发”，不用等整个回合结束。
+            if (frame.event.type === 'assistant/message' && isOwnerToolsKey(key)) {
+              const content = Array.isArray(frame.event.data?.message?.content) ? frame.event.data.message.content : [];
+              const text = content
+                .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+                .map((b) => b.text)
+                .join('');
+              if (text) {
+                ownerStepBuffers.set(frame.sessionId, (ownerStepBuffers.get(frame.sessionId) ?? '') + text);
+                ownerProduced.set(frame.sessionId, (ownerProduced.get(frame.sessionId) ?? '') + text);
+              }
+            }
             // DSH 端（Web 管理界面）已解决审批：清理 QQ 侧挂起，避免管理员在 QQ 端被反复
             // 提示"请回复通过或拒绝"处理一个其实已在 DSH 侧解决的审批。
             // 注意：approval/decided 的 data.id 是 DSH 的审批请求 id，而挂起里存的
@@ -8315,6 +8421,16 @@ async function main() {
             collectors.set(frame.sessionId, collector);
             const ended = collector.push(frame.event);
             if (ended) {
+              // 回合结束：先冲刷剩余缓冲（通常就是最终回复文本），再用 ended.text 兜底补发，
+              // 确保最终回复永不丢失（缓冲机制可能因事件时序漏收，ended.text 是 collector 的权威完整文本）。
+              if (isOwnerToolsKey(key)) {
+                if (sendToolSucceededSessions.has(frame.sessionId)) {
+                  ownerStepBuffers.delete(frame.sessionId);
+                } else {
+                  await flushOwnerStepBuffer(key, frame.sessionId);
+                  await flushOwnerTurnFallback(key, frame.sessionId, ended.text);
+                }
+              }
               // 回合结束：DSH 侧已推进完成，该会话挂起的审批/提问必然已解决
               // （被批准/拒绝/超时跳过）。兜底清理，避免 QQ 端残留挂起导致
               // 管理员消息被误当成审批回答反复提示。
@@ -8351,6 +8467,10 @@ async function main() {
               const sendToolSucceeded = sendToolSucceededSessions.has(frame.sessionId);
               sendToolSucceededSessions.delete(frame.sessionId);
               pendingSendToolCalls.delete(frame.sessionId);
+              const ownerStreamed = ownerStreamedSessions.has(frame.sessionId);
+              ownerStreamedSessions.delete(frame.sessionId);
+              ownerStepBuffers.delete(frame.sessionId);
+              ownerProduced.delete(frame.sessionId);
               toolCallNames.delete(frame.sessionId);
               // 标记本次 turn 是否为“活跃超时退场”发言（用于准确回到观望，避免把旧回复误判为退场）
               const isFarewell = social.exitingSessions.has(frame.sessionId);
@@ -8452,9 +8572,9 @@ async function main() {
                   }
                   continue;
                 }
-                // 本回合已经通过 MCP 发送工具成功发出消息：跳过自动转发，避免重复发送。
-                if (sendToolSucceeded) {
-                  log(`工具已发送消息，跳过自动转发 (${key})`);
+                // 本回合已经通过 MCP 发送工具成功发出消息 / 或已实时转发：跳过自动转发，避免重复发送。
+                if (sendToolSucceeded || ownerStreamed) {
+                  log(`工具已发送消息${ownerStreamed ? '/已实时转发' : ''}，跳过自动转发 (${key})`);
                   if (isFarewell) {
                     const st = socialState(key);
                     if (st.phase === 'exiting') {
@@ -8672,6 +8792,9 @@ async function main() {
         social.silentTurns.clear(); // 清除未消费的摘要静默名额，避免重连后吞掉正常回复
         sendToolSucceededSessions.clear();
         pendingSendToolCalls.clear();
+        ownerStepBuffers.clear();
+        ownerStreamedSessions.clear();
+        ownerProduced.clear();
         v2TurnStartAt.clear();
         toolCallNames.clear();
         pendingWakeKeys.clear();
