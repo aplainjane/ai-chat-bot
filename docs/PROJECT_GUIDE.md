@@ -280,7 +280,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 1. **白名单**：`allowed()` 统一 allow/deny/allowAllWhenEmpty；MCP 工具同语义。
 2. **纯文本发送**：MCP send 用纯文本消息段，禁止 CQ 码注入。
 3. **敏感审计**：`SENSITIVE_RE` 拦截路径/凭据；agent 回复、错误文本、审批/提问理由、MCP send 都会过。
-4. **管理命令**：`/` 命令仅 owner（ownerQQ 可在控制台设置）。
+4. **管理命令**：`/` 命令仅 owner（ownerQQ 可在控制台设置）；管理员自然语言指令（重启/关闭 DSH、help、人设切换等）也仅 owner 私聊触发，由桥接直接处理、不经 AI。
 5. **审批**：非 owner 不能通过审批；超时/覆盖会给 DSH 回执。
 6. **进程控制**：`start/stop_snowluma` 默认禁用；即使开启，也仅允许 `qq-admin`（管理员）会话调用，普通会话会被工具白名单拒绝。
 7. **配置 fail-closed**：config.json 损坏直接退出；白名单默认不放行。
@@ -298,6 +298,11 @@ DSH 事件流（api.events.mux）→ pumpMux()
 - `start.bat`：守护启动（自动拉起、崩溃重启）。
 - `restart.bat`：停止旧 bridge 进程并重新拉起。
 - 控制台：`http://127.0.0.1:3100`（模式、人格、社交参数、白名单/管理员、黑话管理、控制台访问令牌、会话/挂起/日志）。
+- DSH 进程控制（QQ 管理员指令或控制台 API）：
+  - QQ：`重启dsh` / `关闭dsh` / `help`（查看全部指令），桥接直接执行、不经 AI。
+  - 控制台 API：`POST /api/dsh/restart`（重启 DSH）、`POST /api/dsh/shutdown`（关闭 DSH，桥接保持，可再重启拉起）、`POST /api/restart`（重启桥接）。
+  - DSH 路径（安装目录 / node / home）在 `config.json` 的 `dsh.process`（`installDir` / `nodePath` / `homeDir`）配置，`scripts/restart-dsh.ps1`、`scripts/shutdown-dsh.ps1` 通过环境变量读取，不硬编码。
+- 管理员会话强化：DSH 工具调用思维链（中间回复文本）即时转发到 QQ，投递完成与回合末兜底确保最终回复不丢失。
 - 模式：`state/mode.json` 或 DSH settings 的 `qq-mode`；运行 `scripts/setup-dsh.mjs` 的全新环境默认 `reserved2`。
 
 ### 常用调试/测试脚本

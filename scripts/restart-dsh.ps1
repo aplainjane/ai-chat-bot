@@ -11,6 +11,17 @@ Log '=== restart-dsh invoked ==='
 Log ("PSScriptRoot=" + $PSScriptRoot)
 Log ("PSVersion=" + $PSVersionTable.PSVersion.ToString())
 
+# Paths come from the bridge config (dsh.process in config.json) via environment variables.
+$installDir = $env:DSH_INSTALL_DIR
+$nodePath = $env:DSH_NODE_PATH
+$homeDir = $env:DSH_HOME_DIR
+Log ("DSH_INSTALL_DIR=" + $installDir)
+Log ("DSH_NODE_PATH=" + $nodePath)
+Log ("DSH_HOME_DIR=" + $homeDir)
+if (-not $installDir -or -not $nodePath -or -not $homeDir) {
+    Log "ERROR: missing DSH process paths (set dsh.process.installDir/nodePath/homeDir in config.json)"
+}
+
 # 1. Find target processes (node bin.ts web / pnpm dsh web, plus the wrapping cmd).
 $targets = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
     $_.Name -in @('node.exe','cmd.exe') -and ($_.CommandLine -match 'bin\.ts.*web' -or $_.CommandLine -match 'pnpm\.js.*dsh web')
@@ -35,16 +46,20 @@ $still = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-O
 Log ("remaining dsh web node processes after kill: " + $still.Count)
 
 # 3. Start the new DSH web.
-Log 'starting new DSH web...'
-$env:DSH_HOME = 'C:\Users\Administrator\.dsh'
-try {
-    Start-Process -FilePath 'F:\nvm\versions\node\v24.20.0\bin\node.exe' `
-        -ArgumentList '--import','tsx/esm','apps/cli/src/bin.ts','web' `
-        -WorkingDirectory 'F:\deepseek harness\deepseek-harness' `
-        -WindowStyle Hidden
-    Log 'DSH web launch issued'
-} catch {
-    Log ("launch FAILED: " + $_.Exception.Message)
+if ($installDir -and $nodePath -and $homeDir) {
+    Log 'starting new DSH web...'
+    $env:DSH_HOME = $homeDir
+    try {
+        Start-Process -FilePath $nodePath `
+            -ArgumentList '--import','tsx/esm','apps/cli/src/bin.ts','web' `
+            -WorkingDirectory $installDir `
+            -WindowStyle Hidden
+        Log 'DSH web launch issued'
+    } catch {
+        Log ("launch FAILED: " + $_.Exception.Message)
+    }
+} else {
+    Log 'SKIP start: DSH process paths not configured'
 }
 
 # 4. Poll for port 3080 to come up (up to ~30s).

@@ -94,6 +94,8 @@ QQ NT
 - 本地 Web 控制台可管理模式、人设、白名单、社交参数、黑话、表情、会话和运行状态。
 - 增加会话白名单、会话令牌、敏感内容拦截、SSRF 防护、发送限频和控制台鉴权。
 - DSH 重启期间消息会暂存，恢复后继续投递；桥接带单实例锁和 Windows 守护启动脚本。
+- 管理员会话强化：DSH 的工具调用思维链（中间回复文本）即时转发到 QQ；投递完成与回合末双重兜底，确保最终回复不丢失。
+- 管理员可直接在 QQ 重启 / 关闭 DSH（`重启dsh` / `关闭dsh`），或发 `help` 查看全部指令；DSH 进程路径统一在 `config.json` 的 `dsh.process` 中配置。
 
 ## 管理员会话：从 QQ 直接让 DSH 干活
 
@@ -138,6 +140,16 @@ QQ NT
 ```
 
 未被桥接识别的斜杠命令会原样交给 DSH，例如 `/model`。
+
+管理员还可以直接控制 DSH 进程（这些命令同样由桥接直接处理，不经 AI）：
+
+```text
+重启dsh / 重启          重启 DSH（约 10 秒恢复，重载插件与 MCP 工具）
+关闭dsh / 关闭服务      关闭 DSH（桥接保持运行，消息会排队；用「重启dsh」可恢复）
+help / 帮助 / 指令      查看全部管理员指令
+```
+
+DSH 的安装目录、启动用的 node 与 home 路径在 `config.json` 的 `dsh.process`（`installDir` / `nodePath` / `homeDir`）中配置，`scripts/restart-dsh.ps1` 与 `scripts/shutdown-dsh.ps1` 通过环境变量读取这些路径，脚本内不再硬编码。控制台同样提供 `POST /api/dsh/restart` 与 `POST /api/dsh/shutdown` 接口。
 
 管理员也可以直接用自然语言管理人设：
 

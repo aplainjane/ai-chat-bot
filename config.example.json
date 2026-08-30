@@ -5,7 +5,12 @@
     "model": "deepseek-v4-flash-vision-exp",
     "reasoningEffort": "max",
     "ownerTools": false,
-    "ownerWorkspace": "C:\\path\\to\\your\\workspace"
+    "ownerWorkspace": "C:\\path\\to\\your\\workspace",
+    "process": {
+      "installDir": "C:\\path\\to\\deepseek-harness",
+      "nodePath": "C:\\path\\to\\node.exe",
+      "homeDir": "C:\\Users\\You\\.dsh"
+    }
   },
   "snowluma": {
     "wsUrl": "ws://127.0.0.1:3001",

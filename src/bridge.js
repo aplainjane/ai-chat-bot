@@ -59,21 +59,59 @@ const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
 
 // ── 重启 DSH：spawn 独立 ps1（DSH 被杀后脚本仍继续完成重启），约 10 秒恢复 ──
+// DSH 的安装目录 / node 路径 / home 从 config.json 的 dsh.process 读取（不硬编码在脚本里），
+// 通过环境变量传给 ps1，由脚本实际执行杀进程与拉起。
+function dshProcessPaths() {
+  try {
+    const file = readJsonSafe(path.join(ROOT, 'config.json'), {}, false) ?? {};
+    const p = file.dsh?.process ?? {};
+    return {
+      installDir: String(p.installDir ?? '').trim(),
+      nodePath: String(p.nodePath ?? '').trim(),
+      homeDir: String(p.homeDir ?? '').trim()
+    };
+  } catch (error) {
+    log(`读取 dsh.process 配置失败: ${error?.message ?? error}`);
+    return { installDir: '', nodePath: '', homeDir: '' };
+  }
+}
+
 function scheduleDshRestart() {
   try {
     const script = path.join(ROOT, 'scripts', 'restart-dsh.ps1');
     const pwshPath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
     const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script];
+    const { installDir, nodePath, homeDir } = dshProcessPaths();
     // 关键：不能用 detached / windowsHide！实测这两个参数会让 powershell -File
     // 启动后不执行脚本（detached 静默 exit 0；windowsHide 启动失败 0xC0000142）。
     // ps1 内部用绝对路径写日志，不依赖 stdio 重定向。
-    const child = spawn(pwshPath, args, { stdio: 'ignore', cwd: path.dirname(script) });
+    const child = spawn(pwshPath, args, {
+      stdio: 'ignore',
+      cwd: path.dirname(script),
+      env: { ...process.env, DSH_INSTALL_DIR: installDir, DSH_NODE_PATH: nodePath, DSH_HOME_DIR: homeDir }
+    });
     child.on('error', (err) => { log(`重启 DSH：powershell 启动失败: ${err.message}`); });
     child.on('exit', (code, signal) => { log(`重启 DSH：powershell 退出 code=${code} signal=${signal ?? ''}`); });
     child.unref();
     log(`重启 DSH：已 spawn ${pwshPath} -File ${script}`);
   } catch (error) {
     log(`重启 DSH 失败: ${error?.message ?? error}`);
+  }
+}
+
+// ── 关闭 DSH：spawn 独立 ps1 杀掉 DSH web 进程，不重新启动（与重启 DSH 同一套进程识别）──
+function scheduleDshShutdown() {
+  try {
+    const script = path.join(ROOT, 'scripts', 'shutdown-dsh.ps1');
+    const pwshPath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script];
+    const child = spawn(pwshPath, args, { stdio: 'ignore', cwd: path.dirname(script) });
+    child.on('error', (err) => { log(`关闭 DSH：powershell 启动失败: ${err.message}`); });
+    child.on('exit', (code, signal) => { log(`关闭 DSH：powershell 退出 code=${code} signal=${signal ?? ''}`); });
+    child.unref();
+    log(`关闭 DSH：已 spawn ${pwshPath} -File ${script}`);
+  } catch (error) {
+    log(`关闭 DSH 失败: ${error?.message ?? error}`);
   }
 }
 
@@ -4814,6 +4852,15 @@ async function main() {
           }, 500);
           return;
         }
+        // ── 关闭 DSH（spawn 独立脚本杀掉 DSH web 进程，不重启；可再用 /api/dsh/restart 拉起） ──
+        if (req.method === 'POST' && url.pathname === '/api/dsh/shutdown') {
+          sendJson({ ok: true, message: '正在关闭 DSH…（桥接保持运行，消息会入队等待；可用「重启dsh」重新拉起）' });
+          setTimeout(() => {
+            log('控制台：关闭 DSH');
+            scheduleDshShutdown();
+          }, 500);
+          return;
+        }
         sendJson({ ok: false, error: 'not found' }, 404);
       } catch (error) {
         const status = Number(error?.statusCode) || 500;
@@ -7865,6 +7912,35 @@ async function main() {
         await sendToQQ(key, '正在重启 DSH（约 10 秒后恢复）…');
         appendActivity(`${key} 管理员命令：重启 DSH`);
         setTimeout(scheduleDshRestart, 500);
+        return;
+      }
+      // 关闭 DSH：直接执行（不经 AI），只关不启。支持「关闭dsh / 关闭 DSH / 关闭服务 / 关闭服务器 / shutdown」。
+      const shutdownDshRe = /^(?:shutdown|关闭\s*(?:dsh|DSH|服务|服务器))[！!。.]?\s*$/;
+      if (shutdownDshRe.test(roleText)) {
+        await sendToQQ(key, '正在关闭 DSH（桥接保持运行，消息会排队；需要恢复时对我说「重启dsh」）…');
+        appendActivity(`${key} 管理员命令：关闭 DSH`);
+        setTimeout(scheduleDshShutdown, 500);
+        return;
+      }
+      // 查看所有可用指令
+      const helpRe = /^(?:help|帮助|指令|命令|指令列表|命令列表|查看指令|查看命令|有哪些指令)[！!。.]?\s*$/;
+      if (helpRe.test(roleText)) {
+        const helpText = [
+          '【管理员可用指令】',
+          '· 重启dsh / 重启 — 重启 DSH（约 10 秒恢复，重载插件与 MCP 工具）',
+          '· 关闭dsh / 关闭服务 / shutdown — 关闭 DSH（桥接保持，可再「重启dsh」拉起）',
+          '· help / 帮助 / 指令 — 查看本帮助',
+          '· 查看角色卡 / 查看人格 — 查看可用角色卡与人格配置',
+          '· 进入角色扮演 X / 切换角色 X — 设置本会话角色',
+          '· 退出角色扮演 / 不演了 / 恢复人格 — 回到默认人格',
+          '· 设置默认人格：X — 设置全局默认人格',
+          '· 把 group:群号 的人格换成 X — 给指定会话设置角色',
+          '· /silent、/active — 静默 / 恢复（群友模式）',
+          '· /model 等斜杠命令 — 原样交给 DSH 执行',
+          '控制台接口：POST /api/restart（重启桥接）、/api/dsh/restart、/api/dsh/shutdown'
+        ].join('\n');
+        await sendToQQ(key, helpText);
+        appendActivity(`${key} 管理员命令：查看帮助`);
         return;
       }
       // 查看可用角色卡列表
