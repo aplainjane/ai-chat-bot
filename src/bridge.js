@@ -1540,7 +1540,7 @@ async function main() {
   // ownerStreamedSessions：sessionId 该 turn 已实时转发过文本，回合末自动转发须跳过，避免重复。
   const ownerStepBuffers = new Map();
   const ownerStreamedSessions = new Set();
-  const ownerProduced = new Map(); // sessionId -> 本 turn 已产出的 assistant 原始文本（供回合末兜底与 ended.text 对齐）
+  const ownerProduced = new Map(); // sessionId -> 本 turn 已实际发到 QQ 的文本（实时转发/兜底成功发出的累加），供回合末兜底与 ended.text 做减法
   const v2TurnStartAt = new Map(); // sessionId -> timestamp：reserved2 turn 开始时间，用于判断是否“无行动”
   const toolCallNames = new Map(); // sessionId -> Map<callId, toolName>：用于结果日志关联工具名
   const pendingSendToolCalls = new Map(); // sessionId -> Set<callId>：等待 tool/result 的发送类调用
@@ -6425,14 +6425,10 @@ async function main() {
     }
     // 管理员工具会话（reserved2）：投递用 steer 模式打断同一个回合，turn/end 可能迟迟不触发，
     // 导致最终回复文本积压在缓冲里不被发送。这里在每次投递完成时冲刷缓冲兜底：
-    // 若本回合已成功用过发送类工具则丢弃缓冲（工具已自行投递），否则把剩余最终文本实时发出。
+    // 发送工具调用前的中间文本已在 tool/call 时丢弃，这里统一冲刷剩余缓冲（通常就是最终回复）。
     // 与事件流路径共用同一个缓冲，先到者消费后其他路径扑空，天然避免重复。
     if (isOwnerToolsKey(key) && currentMode === 'reserved2') {
-      if (sendToolSucceededSessions.has(sessionId)) {
-        ownerStepBuffers.delete(sessionId);
-      } else {
-        await flushOwnerStepBuffer(key, sessionId, '投递完成实时转发');
-      }
+      await flushOwnerStepBuffer(key, sessionId, '投递完成实时转发');
     }
     return { ok: true };
   }
@@ -8336,29 +8332,34 @@ async function main() {
   }
 
   // 管理员工具会话实时转发：把缓冲的 assistant 文本立即发出（每步文本在下一个工具调用点冲刷）。
+  // 发送成功的文本追加进 ownerProduced（记录"已发到 QQ 的文本"），供回合末兜底用 ended.text 做减法。
   async function flushOwnerStepBuffer(key, sessionId, tag = '实时转发') {
     const text = ownerStepBuffers.get(sessionId) ?? '';
     ownerStepBuffers.delete(sessionId);
     if (!text || !text.trim()) return;
     ownerStreamedSessions.add(sessionId);
     await sendOwnerPlain(key, text, tag);
+    ownerProduced.set(sessionId, (ownerProduced.get(sessionId) ?? '') + text);
   }
 
   // 管理员工具会话回合末兜底：用 turn collector 的 ended.text（权威完整文本）减去本 turn
-  // 已实时转发覆盖的文本，把任何未被实时转发送达的最终回复补发出去，确保最终回复永不丢失。
+  // 已发到 QQ 的文本（ownerProduced），把任何未被实时转发送达的最终回复补发出去。
+  // 注意：即使本回合用过发送类工具（sendToolSucceeded），也必须走这里——发送工具只投递了
+  // 工具消息，最终回复文本仍可能留在缓冲里需要补发（否则会丢最终回复）。
   async function flushOwnerTurnFallback(key, sessionId, endedText) {
     if (!endedText || !endedText.trim()) return;
-    const produced = ownerProduced.get(sessionId) ?? '';
+    const sent = ownerProduced.get(sessionId) ?? '';
     let remaining = endedText;
-    if (produced && remaining.startsWith(produced)) {
-      remaining = remaining.slice(produced.length);
-    } else if (produced && produced.length >= remaining.length && remaining.startsWith(remaining)) {
-      // 不匹配前缀时的保守处理：不重复发送已实时发过的内容
+    if (sent && remaining.startsWith(sent)) {
+      remaining = remaining.slice(sent.length);
+    } else if (sent && sent.length >= remaining.length) {
+      // 不匹配前缀时的保守处理：不重复发送已发过的内容
       remaining = '';
     }
     if (!remaining || !remaining.trim()) return;
     ownerStreamedSessions.add(sessionId);
     await sendOwnerPlain(key, remaining, '回合末兜底');
+    ownerProduced.set(sessionId, (ownerProduced.get(sessionId) ?? '') + remaining);
   }
 
   // DSH 事件流 → QQ
@@ -8473,7 +8474,6 @@ async function main() {
                 .join('');
               if (text) {
                 ownerStepBuffers.set(frame.sessionId, (ownerStepBuffers.get(frame.sessionId) ?? '') + text);
-                ownerProduced.set(frame.sessionId, (ownerProduced.get(frame.sessionId) ?? '') + text);
               }
             }
             // DSH 端（Web 管理界面）已解决审批：清理 QQ 侧挂起，避免管理员在 QQ 端被反复
@@ -8499,13 +8499,12 @@ async function main() {
             if (ended) {
               // 回合结束：先冲刷剩余缓冲（通常就是最终回复文本），再用 ended.text 兜底补发，
               // 确保最终回复永不丢失（缓冲机制可能因事件时序漏收，ended.text 是 collector 的权威完整文本）。
+              // 注意：即使本回合用过发送类工具（sendToolSucceeded）也统一走冲刷+兜底——
+              // 发送工具调用前的中间文本已在 tool/call 时丢弃，缓冲里剩下的通常是发送工具之后的
+              // 最终回复，必须补发；兜底会按"已发文本"做减法，不会重复。
               if (isOwnerToolsKey(key)) {
-                if (sendToolSucceededSessions.has(frame.sessionId)) {
-                  ownerStepBuffers.delete(frame.sessionId);
-                } else {
-                  await flushOwnerStepBuffer(key, frame.sessionId);
-                  await flushOwnerTurnFallback(key, frame.sessionId, ended.text);
-                }
+                await flushOwnerStepBuffer(key, frame.sessionId);
+                await flushOwnerTurnFallback(key, frame.sessionId, ended.text);
               }
               // 回合结束：DSH 侧已推进完成，该会话挂起的审批/提问必然已解决
               // （被批准/拒绝/超时跳过）。兜底清理，避免 QQ 端残留挂起导致
