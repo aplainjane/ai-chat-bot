@@ -7591,6 +7591,11 @@ async function main() {
   function scheduleProactiveCheckV2(key) {
     if (cfg.socialV2?.proactive?.enabled === false) return;
     if (isOwnerToolsKey(key)) return; // 管理员工具会话：不做主动机会检查
+    // 私聊主动搭话开关：默认关闭（避免定时主动搭话打扰私聊好友）；群聊不受影响；
+    // 需要私聊也参与主动搭话时，在 config 的 socialV2.proactive.privateEnabled 打开。
+    if (key.startsWith('private:') && cfg.socialV2?.proactive?.privateEnabled !== true) {
+      return;
+    }
     if (socialV2.paused || currentMode !== 'reserved2') return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     const st = getSocialV2State(key);
