@@ -293,6 +293,15 @@ npm start
 
 Windows 也可以双击 `start.bat`。它通过守护脚本运行，桥接异常退出后会自动重启；关闭守护窗口即停止。`restart.bat` 用于结束旧实例、清理失效锁并重新启动。
 
+### 一键启动整套服务
+
+重启电脑后想一次拉起 SnowLuma / DSH / 桥接，双击根目录的 **`start-all.bat`** 即可：
+
+- 启动哪些服务、启动命令、工作目录都配在 `config.json` 的 `startup.services` 里，改路径不用动代码
+- 已经在运行的服务会自动跳过（按 `match` 正则匹配进程命令行），不会重复启动
+- 每个服务项支持：`name` / `enabled` / `dir` / `cmd` / `args` / `env` / `match`
+- 想先看一遍会执行什么而不真正启动，运行 `scripts\start-all.ps1 -DryRun`
+
 正常启动后，日志中应出现 SnowLuma WebSocket 已连接的信息。控制台默认位于：
 
 ```text

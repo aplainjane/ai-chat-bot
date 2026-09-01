@@ -175,7 +175,8 @@
       "checkIntervalMinMs": 1800000,
       "checkIntervalMaxMs": 5400000,
       "idleThresholdMs": 900000,
-      "probability": 0.3
+      "probability": 0.3,
+      "privateEnabled": false
     },
     "feedback": {
       "maxLength": 500,
@@ -186,5 +187,42 @@
       "unreadLimit": 30,
       "contextWindow": 20
     }
+  },
+  "startup": {
+    "services": [
+      {
+        "name": "snowluma",
+        "enabled": true,
+        "dir": "C:\\path\\to\\SnowLuma-v1.14.13-win-x64-lite",
+        "cmd": "C:\\path\\to\\SnowLuma-v1.14.13-win-x64-lite\\launcher.bat",
+        "args": [],
+        "match": "index\\.mjs"
+      },
+      {
+        "name": "dsh",
+        "enabled": true,
+        "dir": "C:\\path\\to\\deepseek-harness",
+        "cmd": "C:\\node\\node_global\\pnpm.cmd",
+        "args": [
+          "dsh",
+          "web"
+        ],
+        "env": {
+          "DSH_HOME_DIR": "C:\\Users\\Administrator\\.dsh"
+        },
+        "match": "bin\\.ts.*web|dsh\\s+web"
+      },
+      {
+        "name": "bridge",
+        "enabled": true,
+        "dir": "C:\\path\\to\\qq-bridge",
+        "cmd": "cmd.exe",
+        "args": [
+          "/c",
+          "start.bat"
+        ],
+        "match": "bridge\\.js"
+      }
+    ]
   }
 }
