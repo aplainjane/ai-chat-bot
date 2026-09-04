@@ -7396,6 +7396,9 @@ async function main() {
     st.wakeConfig.lastWakeAt = now;
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
     st.lastWakeReason = reason;
+    // 记录本次唤醒投递时已见到的最新消息 seq：供积压唤醒的 stillRelevant 判断使用——
+    // 比这个 seq 更大的消息 = AI 上一回合之后才到来的新消息，忙完必须补发，不能被 mark_read 误杀。
+    st.lastWakeSeqAt = st.lastUnreadSeq || 0;
     saveSocialV2State();
     const promptText = buildWakePromptV2(key, reason);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
@@ -7497,6 +7500,60 @@ async function main() {
     return WAKE_PRIORITY[base] ?? 0;
   }
 
+  // 判定一条“繁忙期间被暂存的唤醒原因”是否仍然值得补发。
+  // 旧实现只看 unread，一旦 AI 回复后顺手 mark_read 清了 unread，刚来的新消息会被误判为“已处理”而漏掉。
+  // 新逻辑：unread 里还有该 seq（AI 还没看）→ 补发；
+  // 否则若该 seq 比 AI 最近一次唤醒投递时见过的最后 seq（lastWakeSeqAt）更大，
+  // 说明它是在 AI 上一个回合之后才到来的新消息，同样补发；
+  // 只有那些在上次唤醒范围内、且已被 AI 看过的消息才跳过，避免重复唤醒。
+  function isWakeReasonStillRelevantV2(st, item) {
+    if (!item || typeof item !== 'object') return true; // 兼容旧字符串残留
+    const seq = Number(item.seq);
+    if (!Number.isFinite(seq) || seq <= 0) return true;
+    const unread = Array.isArray(st.unread) ? st.unread : [];
+    if (unread.some((m) => m && Number(m.seq) >= seq)) return true;
+    const lastCovered = Number(st.lastWakeSeqAt) || 0;
+    return seq > lastCovered;
+  }
+
+  // 补发繁忙期间积压的唤醒原因：不再只等 turn/end 且每次只补一条，
+  // 而是循环补发最多 max 条（每条仍走 stillRelevant 过滤），
+  // 并在“会话已不繁忙但还有积压”时也尽快消费（scheduleWakeV2 入口调用）。
+  const flushingWakeKeys = new Set(); // 防止 flush 内再调 scheduleWakeV2 造成递归
+  // “真实回合占用”判断：不含 pendingWakeTimer。
+  // flush 循环里若用 isConversationBusyV2，补发第 1 条就会设置 8s batch timer 让 busy 变 true，
+  // 导致后面积压补不进去；这里只关心真正的回合/队列占用，让剩余积压能合并进同一次唤醒。
+  function isTurnOccupiedV2(key, st) {
+    if (pendingWakeKeys.has(key)) return true;
+    const q = promptQueues.get(key);
+    if (q && (q.running || q.queue.length > 0)) return true;
+    const sid = state.sessions[key];
+    if (sid && (v2TurnStartAt.has(sid) || collectors.has(sid))) return true;
+    return false;
+  }
+  function flushPendingWakeReasonsV2(key, max = 3) {
+    if (flushingWakeKeys.has(key)) return;
+    flushingWakeKeys.add(key);
+    try {
+      const st = getSocialV2State(key);
+      if (!Array.isArray(st.pendingWakeReasons) || st.pendingWakeReasons.length === 0) return;
+      for (let i = 0; i < max; i++) {
+        if (!Array.isArray(st.pendingWakeReasons) || st.pendingWakeReasons.length === 0) break;
+        if (isTurnOccupiedV2(key, st)) break; // 真有回合/队列占用，剩余留给下一次机会
+        const item = st.pendingWakeReasons.shift();
+        if (!item || typeof item !== 'object') continue;
+        if (isWakeReasonStillRelevantV2(st, item)) {
+          log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
+          scheduleWakeV2(key, item.reason);
+        } else {
+          log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
+        }
+      }
+    } finally {
+      flushingWakeKeys.delete(key);
+    }
+  }
+
   function scheduleWakeV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (isOwnerToolsKey(key)) return; // 管理员工具会话：不走仿真唤醒，避免污染其直接问答
@@ -7506,6 +7563,11 @@ async function main() {
       return;
     }
     const st = getSocialV2State(key);
+    // 兜底：会话已不繁忙但还有积压唤醒时，先把积压补发掉，避免只等 turn/end 导致漏发。
+    // flush 内部调用 scheduleWakeV2 时，flushingWakeKeys 标记会防止这里再次进入 flush（防递归）。
+    if (!flushingWakeKeys.has(key)) {
+      flushPendingWakeReasonsV2(key);
+    }
     if (st.pendingWakeTimer) {
       // 合并窗口内已有待发送唤醒：按优先级升级最终原因，避免先概率后 @ 却仍按概率唤醒。
       const cur = st.pendingWakeReason || reason;
@@ -7948,7 +8010,7 @@ async function main() {
       const listRolesRe = /^(?:查看|显示|列出)\s*(?:角色卡|可用角色|角色列表)[！!。.]?\s*$/;
       if (listRolesRe.test(roleText)) {
         const roles = listRoles();
-        await sendToQQ(key, `可用角色卡（qq-bridge/roles/）：${roles.join('、') || '（无）'}。想看内容可直接对我说「看下小鲸鱼的角色卡」。`);
+        await sendToQQ(key, `可用角色卡（qq-bridge/roles/）：${roles.join('、') || '（无）'}。`);
         return;
       }
       // 查看人格配置
@@ -8603,25 +8665,10 @@ async function main() {
                   }
                 }
               }
-              // 繁忙期间被暂存的唤醒原因：当前 turn 结束后补一次，避免关键 @/提问被漏掉。
-              // 但如果触发它的消息已经被 AI 在当前回合处理（unread 中已不存在该 seq），则不再补发。
-              {
-                const stEnd = getSocialV2State(key);
-                if (Array.isArray(stEnd.pendingWakeReasons) && stEnd.pendingWakeReasons.length) {
-                  const item = stEnd.pendingWakeReasons.shift();
-                  if (!item || typeof item !== 'object') {
-                    // 兼容旧字符串残留
-                  } else {
-                    const stillRelevant = Array.isArray(stEnd.unread) && stEnd.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
-                    if (stillRelevant) {
-                      log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
-                      scheduleWakeV2(key, item.reason);
-                    } else {
-                      log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
-                    }
-                  }
-                }
-              }
+              // 繁忙期间被暂存的唤醒原因：当前 turn 结束后补发，避免关键 @/提问被漏掉。
+              // 循环补发（最多 3 条），每条仍按“seq 是否已被当前回合处理”过滤；
+              // stillRelevant 已放宽为同时看 recentMessages，mark_read 清了 unread 也不会误杀。
+              flushPendingWakeReasonsV2(key);
               if (ended.reason.kind === 'completed' && ended.text.trim()) {
                 const plain = mdToPlain(ended.text);
                 // 纯 Markdown/空白输出按“无文本”处理，避免后续 planSocialTimeline 拿空串崩溃。
