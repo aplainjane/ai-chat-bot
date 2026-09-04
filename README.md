@@ -301,6 +301,7 @@ Windows 也可以双击 `start.bat`。它通过守护脚本运行，桥接异常
 - 已经在运行的服务会自动跳过（优先按 `port` 端口判断在监听就跳过，`match` 正则兜底），不会重复启动
 - 每个服务项支持：`name` / `enabled` / `port` / `dir` / `cmd` / `args` / `env` / `match`
 - 想先看一遍会执行什么而不真正启动，运行 `scripts\start-all.ps1 -DryRun`
+- **`dsh` 服务项必须直接指定 Node 24 的绝对路径**：DSH 源码要求 Node.js `^22.19.0` 或 `>=24.0.0`，应把 `cmd` 指向满足版本的 `node.exe`（如 `F:\nvm\versions\node\v24.20.0\bin\node.exe`），`args` 用 `["--import","tsx/esm","apps/cli/src/bin.ts","web"]`，`dir` 指向 DSH 仓库根目录，`env` 设 `DSH_HOME`（如 `C:\Users\Administrator\.dsh`）。不要依赖 `pnpm.cmd dsh web` 经由 PATH 间接调用 node——PATH 里的旧版 node（如 v22.14.0）不满足版本要求，会导致 DSH 启动即失败、端口 3080 起不来（表现为 start-all 其它服务都正常、唯独 DSH 没起来）。
 
 ### 开机自启 + 4 小时自检（可选）
 
