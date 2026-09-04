@@ -1,10 +1,7 @@
 @echo off
-chcp 65001 >nul
+rem One-click start: snowluma / dsh / bridge. ASCII-only on purpose:
+rem cmd.exe parses .bat files in the system codepage (GBK); UTF-8 Chinese breaks parsing.
 cd /d "%~dp0"
-echo ========================================
-echo  一键启动：snowluma / dsh / bridge
-echo  已在运行的服务会自动跳过
-echo ========================================
-powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\start-all.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-all.ps1" %*
 echo.
 pause

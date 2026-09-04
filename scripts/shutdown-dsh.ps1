@@ -1,4 +1,4 @@
-# shutdown-dsh.ps1 - Stop the DSH web service (absolute-path logging version).
+﻿# shutdown-dsh.ps1 - Stop the DSH web service (absolute-path logging version).
 # Kills the DSH web process(es) WITHOUT restarting them. Use restart-dsh.ps1 to bring it back.
 $ErrorActionPreference = 'Continue'
 $logFile = 'F:\deepseek harness\workspace\qq-bridge\state\shutdown-dsh.log'

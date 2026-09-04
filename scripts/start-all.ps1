@@ -42,6 +42,19 @@ function Test-Running([string]$match) {
   return $null
 }
 
+# 端口探测：纯 .NET TcpClient，不依赖 CIM/WMI。
+# 服务是否在线以端口为准——命令行匹配只是兜底，防止误判导致重复启动抢端口。
+function Test-PortListen([int]$port) {
+  try {
+    $c = New-Object System.Net.Sockets.TcpClient
+    $iar = $c.BeginConnect('127.0.0.1', $port, $null, $null)
+    $ok = $iar.AsyncWaitHandle.WaitOne(800)
+    if ($ok) { $c.EndConnect($iar) }
+    $c.Close()
+    return [bool]$ok
+  } catch { return $false }
+}
+
 foreach ($svc in $services) {
   if ($svc.enabled -eq $false) {
     Write-Host "[跳过] $($svc.name) （已禁用）"
@@ -52,6 +65,14 @@ foreach ($svc in $services) {
   $svcArgs = @($svc.args)
   $match = [string]$svc.match
   $desc = "$cmd $(($svcArgs -join ' '))  (cwd=$dir)"
+
+  # 优先看端口：在监听 = 在线，直接跳过（绝不重复启动）。
+  $port = 0
+  try { $port = [int]$svc.port } catch { $port = 0 }
+  if ($port -gt 0 -and (Test-PortListen $port)) {
+    Write-Host "[已在运行] $($svc.name)  (端口 $port 监听中)  跳过"
+    continue
+  }
 
   if ($match) {
     $pidHit = Test-Running $match
@@ -77,7 +98,12 @@ foreach ($svc in $services) {
   }
 
   try {
-    Start-Process -FilePath $cmd -ArgumentList $svcArgs -WorkingDirectory $dir -WindowStyle Minimized
+    # PS5.1 的 Start-Process 不接受空的 -ArgumentList 数组，空参数时干脆不传
+    if ($svcArgs.Count -gt 0) {
+      Start-Process -FilePath $cmd -ArgumentList $svcArgs -WorkingDirectory $dir -WindowStyle Minimized
+    } else {
+      Start-Process -FilePath $cmd -WorkingDirectory $dir -WindowStyle Minimized
+    }
     Write-Host "[已启动] $($svc.name) : $desc"
   } catch {
     Write-Host "[失败] $($svc.name) : $($_.Exception.Message)"

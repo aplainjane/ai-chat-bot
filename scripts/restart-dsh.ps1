@@ -1,4 +1,4 @@
-# restart-dsh.ps1 - Restart the DSH web service (absolute-path logging version).
+﻿# restart-dsh.ps1 - Restart the DSH web service (absolute-path logging version).
 $ErrorActionPreference = 'Continue'
 $logFile = 'F:\deepseek harness\workspace\qq-bridge\state\restart-dsh.log'
 function Log([string]$msg) {

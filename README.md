@@ -298,9 +298,20 @@ Windows 也可以双击 `start.bat`。它通过守护脚本运行，桥接异常
 重启电脑后想一次拉起 SnowLuma / DSH / 桥接，双击根目录的 **`start-all.bat`** 即可：
 
 - 启动哪些服务、启动命令、工作目录都配在 `config.json` 的 `startup.services` 里，改路径不用动代码
-- 已经在运行的服务会自动跳过（按 `match` 正则匹配进程命令行），不会重复启动
-- 每个服务项支持：`name` / `enabled` / `dir` / `cmd` / `args` / `env` / `match`
+- 已经在运行的服务会自动跳过（优先按 `port` 端口判断在监听就跳过，`match` 正则兜底），不会重复启动
+- 每个服务项支持：`name` / `enabled` / `port` / `dir` / `cmd` / `args` / `env` / `match`
 - 想先看一遍会执行什么而不真正启动，运行 `scripts\start-all.ps1 -DryRun`
+
+### 开机自启 + 4 小时自检（可选）
+
+想做到"开机全自动 + 卡死自动抢救"，一次性双击根目录的 **`注册开机自启和自检.bat`**（只做一次）：
+
+- **开机自启**：写入当前用户启动文件夹快捷方式，登录后自动跑 `start-all.ps1` 拉起整套
+- **每 4 小时自检**：计划任务 `qq-bot-watchdog`，跑 `scripts\watchdog.ps1` —— 端口巡检 + QQ 活性探测（真实服务器请求），发现 SnowLuma 卡死自动重启，救不回来就弹 Windows 通知提醒你
+- SnowLuma 目录 / WebUI 密码都从 `config.json` 的 `snowluma.*` 读取，不需要改脚本
+- `scripts\inject-qq.ps1`：SnowLuma 起来了但 OneBot(3001) 没起来时，自动登录 WebUI 完成 QQ 钩子注入（需要 `config.json` 里 `snowluma.webuiPassword`）
+- 日志在 `state\`：`watchdog.log` / `start-all.log` / `inject-qq.log`
+- 卸载：删启动文件夹里的 `qq-bot-start-all.lnk`，`schtasks /Delete /TN qq-bot-watchdog /F`
 
 正常启动后，日志中应出现 SnowLuma WebSocket 已连接的信息。控制台默认位于：
 

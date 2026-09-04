@@ -18,6 +18,7 @@
     "accessToken": "",
     "launcherPath": "C:\\path\\to\\SnowLuma\\launcher.bat",
     "homeDir": "C:\\path\\to\\SnowLuma",
+    "webuiPassword": "",
     "allowProcessControl": false
   },
   "ownerQQ": 123456789,
@@ -193,6 +194,7 @@
       {
         "name": "snowluma",
         "enabled": true,
+        "port": 3001,
         "dir": "C:\\path\\to\\SnowLuma-v1.14.13-win-x64-lite",
         "cmd": "C:\\path\\to\\SnowLuma-v1.14.13-win-x64-lite\\launcher.bat",
         "args": [],
@@ -201,6 +203,7 @@
       {
         "name": "dsh",
         "enabled": true,
+        "port": 3080,
         "dir": "C:\\path\\to\\deepseek-harness",
         "cmd": "C:\\node\\node_global\\pnpm.cmd",
         "args": [
@@ -215,6 +218,7 @@
       {
         "name": "bridge",
         "enabled": true,
+        "port": 3100,
         "dir": "C:\\path\\to\\qq-bridge",
         "cmd": "cmd.exe",
         "args": [
